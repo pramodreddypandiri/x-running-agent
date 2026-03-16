@@ -1,0 +1,21 @@
+{
+  "name": "x-comment-agent",
+  "version": "1.0.0",
+  "description": "AI-powered X (Twitter) commenting agent with autonomous and manual modes",
+  "main": "whale-bot.js",
+  "scripts": {
+    "whale": "node whale-bot.js",
+    "manual": "node manual-bot.js",
+    "post": "node post-scheduler.js",
+    "setup-cookies": "node scripts/setup-cookies.js",
+    "verify-accounts": "node scripts/verify-accounts.js",
+    "add-to-list": "node scripts/add-to-list.js"
+  },
+  "keywords": ["twitter", "x", "ai", "automation", "claude", "commenting"],
+  "author": "talhaasiiif",
+  "license": "MIT",
+  "dependencies": {
+    "playwright": "^1.50.0",
+    "rss-parser": "^3.13.0"
+  }
+}

@@ -1,0 +1,9 @@
+node_modules/
+.env
+x-session.json
+cookies-raw.json
+data/
+prompts/whale-prompt.txt
+prompts/manual-prompt.txt
+config.json
+*.log

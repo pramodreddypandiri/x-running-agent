@@ -1,0 +1,14 @@
+[Unit]
+Description=X Whale Auto-Commenter
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/x-comment-agent
+EnvironmentFile=/root/x-comment-agent/.env
+ExecStart=/usr/bin/node /root/x-comment-agent/whale-bot.js
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
