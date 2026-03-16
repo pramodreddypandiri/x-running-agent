@@ -48,11 +48,11 @@ function addEdit(ta, tt, oc, ec, ln) {
 function buildFeedbackContext() {
   const fb = loadFeedback(); let ctx = '';
   const ra = fb.approvals.slice(-15);
-  if (ra.length > 0) { ctx += 'COMMENTS TALHA APPROVED:\n'; ra.forEach(a => { ctx += '- @' + a.tweetAuthor + ' -> chose ' + a.chosenOption + ': "' + a.commentText + '"\n'; }); ctx += '\n'; }
+  if (ra.length > 0) { ctx += 'COMMENTS PRAMOD APPROVED:\n'; ra.forEach(a => { ctx += '- @' + a.tweetAuthor + ' -> chose ' + a.chosenOption + ': "' + a.commentText + '"\n'; }); ctx += '\n'; }
   const rr = fb.rejections.slice(-10);
-  if (rr.length > 0) { ctx += 'COMMENTS TALHA REJECTED:\n'; rr.forEach(r => { ctx += '- Reason: ' + r.reason + '. Example: "' + (r.rejectedComments[0]||'').substring(0,80) + '"\n'; }); ctx += '\n'; }
+  if (rr.length > 0) { ctx += 'COMMENTS PRAMOD REJECTED:\n'; rr.forEach(r => { ctx += '- Reason: ' + r.reason + '. Example: "' + (r.rejectedComments[0]||'').substring(0,80) + '"\n'; }); ctx += '\n'; }
   const re = fb.edits.slice(-5);
-  if (re.length > 0) { ctx += 'TALHA EDITS:\n'; re.forEach(e => { ctx += '- "' + e.editedComment + '"\n'; }); ctx += '\n'; }
+  if (re.length > 0) { ctx += 'PRAMOD EDITS:\n'; re.forEach(e => { ctx += '- "' + e.editedComment + '"\n'; }); ctx += '\n'; }
   if (fb.approvals.length >= 10) {
     const oc = {}; fb.approvals.slice(-30).forEach(a => { oc[a.chosenOption] = (oc[a.chosenOption]||0)+1; });
     const s = Object.entries(oc).sort((a,b)=>b[1]-a[1]);

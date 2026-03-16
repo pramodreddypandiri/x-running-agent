@@ -4,9 +4,9 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/root/x-comment-agent
-EnvironmentFile=/root/x-comment-agent/.env
-ExecStart=/usr/bin/node /root/x-comment-agent/manual-bot.js
+WorkingDirectory=/root/x-running-agent
+EnvironmentFile=/root/x-running-agent/.env
+ExecStart=/usr/bin/node /root/x-running-agent/manual-bot.js
 Restart=always
 RestartSec=30
 

@@ -4,9 +4,9 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/root/x-comment-agent
-EnvironmentFile=/root/x-comment-agent/.env
-ExecStart=/usr/bin/node /root/x-comment-agent/post-scheduler.js
+WorkingDirectory=/root/x-running-agent
+EnvironmentFile=/root/x-running-agent/.env
+ExecStart=/usr/bin/node /root/x-running-agent/post-scheduler.js
 Restart=always
 RestartSec=30
 

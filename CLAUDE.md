@@ -99,7 +99,7 @@ All runtime state is in `./data/` (not committed):
 
 ### Deployment (Linux server)
 
-The `services/` directory contains systemd unit files. Deploy to `/etc/systemd/system/` and use `systemctl enable/start/stop/restart whale-bot`. Logs via `journalctl -u whale-bot -f`. Server is expected at `/root/x-comment-agent/`.
+The `services/` directory contains systemd unit files. Deploy to `/etc/systemd/system/` and use `systemctl enable/start/stop/restart whale-bot`. Logs via `journalctl -u whale-bot -f`. Server is expected at `/root/x-running-agent/`.
 
 ## Key Files
 

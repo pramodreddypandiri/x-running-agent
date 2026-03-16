@@ -149,8 +149,8 @@ node --version
 
 ```bash
 # Create project folder and go into it
-mkdir -p /root/x-comment-agent
-cd /root/x-comment-agent
+mkdir -p /root/x-running-agent
+cd /root/x-running-agent
 ```
 
 ```bash
@@ -204,18 +204,18 @@ The server needs to be "logged in" to your X account. We do this by copying your
 8. Upload it to your server (from your computer terminal, not the server):
 
 ```bash
-scp ~/Downloads/cookies-raw.json root@YOUR_SERVER_IP:/root/x-comment-agent/
+scp ~/Downloads/cookies-raw.json root@YOUR_SERVER_IP:/root/x-running-agent/
 ```
 
 If you saved it somewhere else, change the path. For example if it's on your Desktop:
 ```bash
-scp ~/Desktop/cookies-raw.json root@YOUR_SERVER_IP:/root/x-comment-agent/
+scp ~/Desktop/cookies-raw.json root@YOUR_SERVER_IP:/root/x-running-agent/
 ```
 
 9. Now go to your **server terminal** (where you see `root@x-agent:~#`) and convert the cookies:
 
 ```bash
-cd /root/x-comment-agent
+cd /root/x-running-agent
 node scripts/setup-cookies.js
 ```
 
@@ -226,7 +226,7 @@ You should see: **✅ Converted XX cookies**
 Still on the server, run this to verify the cookies work:
 
 ```bash
-cd /root/x-comment-agent && node -e "
+cd /root/x-running-agent && node -e "
 const { chromium } = require('playwright');
 (async () => {
   const b = await chromium.launch({headless:true, args:['--no-sandbox']});
@@ -282,7 +282,7 @@ This is how you'll control the agent from your phone.
 Go to your server terminal and edit the env file:
 
 ```bash
-cd /root/x-comment-agent
+cd /root/x-running-agent
 nano .env
 ```
 
@@ -328,7 +328,7 @@ Create separate lists for different goals:
 On the server:
 
 ```bash
-nano /root/x-comment-agent/config.json
+nano /root/x-running-agent/config.json
 ```
 
 Replace the placeholder list URLs and strategies. Each list needs a name, URL, and strategy (instructions for how to comment on that list).
@@ -340,7 +340,7 @@ Replace the placeholder list URLs and strategies. Each list needs a name, URL, a
 This is the most important file. It tells Claude how to sound like YOU. Bad prompt = generic AI comments. Good prompt = comments that sound genuinely human.
 
 ```bash
-cd /root/x-comment-agent
+cd /root/x-running-agent
 cp prompts/whale-prompt.example.txt prompts/whale-prompt.txt
 nano prompts/whale-prompt.txt
 ```
@@ -364,7 +364,7 @@ Make sure you've tapped **Start** on your Telegram bot (Step 8).
 On the server:
 
 ```bash
-cd /root/x-comment-agent
+cd /root/x-running-agent
 source .env && export TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID ANTHROPIC_API_KEY X_USERNAME
 node whale-bot.js
 ```
@@ -390,13 +390,13 @@ Now we make it run forever, even when you close your laptop.
 
 ```bash
 # Copy the service file
-cp /root/x-comment-agent/services/whale-bot.service /etc/systemd/system/
+cp /root/x-running-agent/services/whale-bot.service /etc/systemd/system/
 
 # Open it and make sure the paths are correct
 nano /etc/systemd/system/whale-bot.service
 ```
 
-Make sure `WorkingDirectory` says `/root/x-comment-agent` and `ExecStart` says `/usr/bin/node /root/x-comment-agent/whale-bot.js`. Save and exit.
+Make sure `WorkingDirectory` says `/root/x-running-agent` and `ExecStart` says `/usr/bin/node /root/x-running-agent/whale-bot.js`. Save and exit.
 
 ```bash
 # Tell the system about the new service
@@ -469,8 +469,8 @@ All these values are at the top of `whale-bot.js`. Change them to whatever you w
 Your cookies expired. This happens every few weeks.
 1. Go to x.com on your browser, make sure you're logged in
 2. Export cookies with EditThisCookie
-3. Upload: `scp cookies-raw.json root@YOUR_IP:/root/x-comment-agent/`
-4. Convert: `ssh root@YOUR_IP "cd /root/x-comment-agent && node scripts/setup-cookies.js"`
+3. Upload: `scp cookies-raw.json root@YOUR_IP:/root/x-running-agent/`
+4. Convert: `ssh root@YOUR_IP "cd /root/x-running-agent && node scripts/setup-cookies.js"`
 5. Restart: `ssh root@YOUR_IP "systemctl restart whale-bot"`
 
 **"Found 0 tweets" every cycle**
@@ -528,6 +528,4 @@ MIT — do whatever you want with it.
 
 ## Credits
 
-Built by [@talhaasiiif](https://x.com/talhaasiiif).
-
-Need help setting this up? DM me on [X](https://x.com/talhaasiiif).
+Built by [@PramodReddy1606](https://x.com/PramodReddy1606).

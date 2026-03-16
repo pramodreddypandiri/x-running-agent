@@ -139,7 +139,7 @@ async function deleteComment(page, tweetUrl) {
   try {
     await page.goto(tweetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(2000);
-    // Find our reply (from @talhaasiiif)
+    // Find our reply (from @PramodReddy1606)
     const articles = await page.$$('article[data-testid="tweet"]');
     for (const article of articles) {
       const nameEl = await article.$('div[data-testid="User-Name"]');
@@ -295,18 +295,18 @@ async function generateComment(tweetText, tweetAuthor, gp) {
   let fbCtx = '';
   const ra = fb.approvals.slice(-10);
   if (ra.length > 0) {
-    fbCtx += 'COMMENTS TALHA LIKED:\n';
+    fbCtx += 'COMMENTS PRAMOD LIKED:\n';
     ra.forEach(a => { fbCtx += '- "' + a.commentText + '"\n'; });
   }
   const re = fb.edits.slice(-5);
   if (re.length > 0) {
-    fbCtx += 'TALHA REWRITES:\n';
+    fbCtx += 'PRAMOD REWRITES:\n';
     re.forEach(e => { fbCtx += '- "' + e.editedComment + '"\n'; });
   }
   // Add whale-specific feedback
   const wfbRecent = wfb.feedback.filter(f => f.feedback).slice(-10);
   if (wfbRecent.length > 0) {
-    fbCtx += '\nWHALE COMMENT FEEDBACK FROM TALHA:\n';
+    fbCtx += '\nWHALE COMMENT FEEDBACK FROM PRAMOD:\n';
     wfbRecent.forEach(f => {
       fbCtx += '- ' + (f.deleted ? 'DELETED' : 'KEPT') + ' comment on @' + f.author + ': "' + f.comment.substring(0, 60) + '" → Feedback: "' + f.feedback + '"\n';
     });
@@ -535,7 +535,7 @@ async function checkForReplies(page) {
 }
 
 async function generateReply(ourComment, theirReply, theirUsername, originalAuthor) {
-  const prompt = `You are Talha (@talhaasiiif). You commented on @${originalAuthor}'s tweet. Now @${theirUsername} replied to your comment. Continue the conversation naturally.
+  const prompt = `You are Pramod (@PramodReddy1606). You commented on @${originalAuthor}'s tweet. Now @${theirUsername} replied to your comment. Continue the conversation naturally.
 
 YOUR ORIGINAL COMMENT: "${ourComment}"
 

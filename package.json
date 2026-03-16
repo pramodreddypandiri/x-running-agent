@@ -1,5 +1,5 @@
 {
-  "name": "x-comment-agent",
+  "name": "x-running-agent",
   "version": "1.0.0",
   "description": "AI-powered X (Twitter) commenting agent with autonomous and manual modes",
   "main": "whale-bot.js",
@@ -12,7 +12,7 @@
     "add-to-list": "node scripts/add-to-list.js"
   },
   "keywords": ["twitter", "x", "ai", "automation", "claude", "commenting"],
-  "author": "talhaasiiif",
+  "author": "pramodreddypandiri",
   "license": "MIT",
   "dependencies": {
     "playwright": "^1.50.0",
