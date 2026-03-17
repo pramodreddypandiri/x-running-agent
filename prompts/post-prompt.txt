@@ -23,6 +23,8 @@ TWEET GOALS:
 TODAY'S AI/DEV NEWS (from RSS feeds):
 {RSS_CONTEXT}
 
+{POST_FEEDBACK}
+
 ---
 
 Write 3 original tweet options (A, B, C).

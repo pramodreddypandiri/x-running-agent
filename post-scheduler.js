@@ -1,13 +1,16 @@
+require('dotenv').config();
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 const RSSParser = require('rss-parser');
 
 // ─── PATHS ───
+const CONFIG_PATH = process.env.CONFIG_PATH || './config.json';
 const SESSION_PATH = process.env.SESSION_PATH || './x-session.json';
 const PROMPT_PATH = process.env.POST_PROMPT_PATH || './prompts/post-prompt.txt';
 const STATE_PATH = './data/post-state.json';
 const LOG_PATH = './data/post-log.json';
+const FEEDBACK_PATH = './data/post-feedback.json';
 
 // ─── CONFIG ───
 const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -45,6 +48,25 @@ function loadLogs() { return loadJSON(LOG_PATH, { posts: [] }); }
 function saveLogs(l) { saveJSON(LOG_PATH, l); }
 
 function getTodayKey() { return new Date().toISOString().split('T')[0]; }
+
+// ─── POST FEEDBACK ───
+function loadPostFeedback() { return loadJSON(FEEDBACK_PATH, { approved: [], skipped: 0, edited: 0 }); }
+function savePostFeedback(fb) { saveJSON(FEEDBACK_PATH, fb); }
+function recordApproval(option, text) {
+  const fb = loadPostFeedback();
+  fb.approved.push({ date: new Date().toISOString(), option, text: text.substring(0, 280) });
+  savePostFeedback(fb);
+}
+function recordSkip() { const fb = loadPostFeedback(); fb.skipped++; savePostFeedback(fb); }
+function recordEdit(text) { const fb = loadPostFeedback(); fb.edited++; fb.approved.push({ date: new Date().toISOString(), option: 'EDIT', text: text.substring(0, 280) }); savePostFeedback(fb); }
+function buildPostFeedback() {
+  const fb = loadPostFeedback();
+  const recent = fb.approved.slice(-10);
+  if (recent.length === 0) return 'No post feedback yet.';
+  let ctx = 'POSTS PRAMOD APPROVED:\n';
+  recent.forEach(a => { ctx += '- [' + a.option + '] "' + a.text + '"\n'; });
+  return ctx;
+}
 
 // ─── PACIFIC TIME ───
 function getPTHourMinute() {
@@ -103,7 +125,8 @@ async function fetchFeeds(feeds) {
 // ─── GENERATE POST OPTIONS ───
 async function generatePostOptions(stories, promptTemplate) {
   const context = stories.map(s => '- ' + s.title + ' [' + s.source + ']').join('\n');
-  const prompt = promptTemplate.replace('{RSS_CONTEXT}', context);
+  const feedbackCtx = buildPostFeedback();
+  const prompt = promptTemplate.replace('{RSS_CONTEXT}', context).replace('{POST_FEEDBACK}', feedbackCtx);
 
   const r = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -235,6 +258,7 @@ async function checkTGCommands() {
           const idx = parseInt(data.substring(lastUnderscore + 1));
           const pending = pendingPosts.get(id);
           if (!pending) continue;
+          recordApproval(['A', 'B', 'C'][idx], pending.options[idx]);
           await handlePost(id, pending.options[idx]);
         } else if (action === 'pe') {
           const id = data.substring(3);
@@ -245,6 +269,7 @@ async function checkTGCommands() {
         } else if (action === 'ps') {
           const id = data.substring(3);
           clearPending(id);
+          recordSkip();
           // Mark today as skipped so we don't re-trigger
           const state = loadState();
           state.lastPostedDate = getTodayKey();
@@ -266,6 +291,7 @@ async function checkTGCommands() {
             await sendTG('⚠️ Too long (' + txt.length + ' chars). Max 280. Try again:');
             continue;
           }
+          recordEdit(txt);
           await handlePost(editId, txt);
           continue;
         }
@@ -318,7 +344,7 @@ async function triggerGenerate() {
   const prompt = loadText(PROMPT_PATH);
   if (!prompt) { await sendTG('⚠️ Missing prompt at ' + PROMPT_PATH); return; }
 
-  const config = loadJSON('./config.json', {});
+  const config = loadJSON(CONFIG_PATH, {});
   const feedList = (config.post_scheduler && config.post_scheduler.rss_feeds) || DEFAULT_RSS_FEEDS;
 
   const stories = await fetchFeeds(feedList);
@@ -390,7 +416,8 @@ async function main() {
         if (ptH === POST_HOUR_PT && ptM >= jitter) {
           if (state.lastPostedDate !== getTodayKey()) {
             console.log('Triggering daily post generation...');
-            // Reset jitter for tomorrow
+            // Mark today to prevent duplicate triggers on restart
+            state.lastPostedDate = getTodayKey();
             state.todayJitter = Math.floor(Math.random() * 60);
             saveState(state);
             await triggerGenerate();

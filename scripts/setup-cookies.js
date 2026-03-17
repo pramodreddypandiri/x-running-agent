@@ -17,7 +17,7 @@ try {
     expires: c.expirationDate || -1,
     httpOnly: c.httpOnly || false,
     secure: c.secure || true,
-    sameSite: (c.sameSite || 'Lax')
+    sameSite: ({ 'no_restriction': 'None', 'lax': 'Lax', 'strict': 'Strict' }[(c.sameSite || '').toLowerCase()] || 'Lax')
   }));
 
   const storageState = {

@@ -106,7 +106,7 @@ Polls Substack RSS feed daily. On new post, Claude generates a thread teaser (ho
 
 | List name | Purpose | Who to add |
 |-----------|---------|------------|
-| Startups and founders | Job radar | Anthropic, OpenAI, Mistral, Cohere, Together AI, xAI employees + founders |
+| Whales | Job radar | Anthropic, OpenAI, Mistral, Cohere, Together AI, xAI employees + founders |
 | AI Builders / Agents | Core niche audience | @swyx, @simonw, @jeremyphoward, @fchollet, agent builders |
 | Startups and founders | Network targets | YC AI alumni, indie hackers building with LLMs |
 | OSS Contributors | Peers | Active contributors in AI tools, dev tools, Rust ecosystem |

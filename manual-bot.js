@@ -1,3 +1,4 @@
+require('dotenv').config();
 const { chromium } = require('playwright');
 const fs = require('fs');
 
@@ -342,6 +343,7 @@ async function checkApprovals() {
       if (up.callback_query) {
         const d = up.callback_query.data; const p = d.split('_');
         const act = p[0]; const aid = p[1]; const oi = p[2] !== undefined ? parseInt(p[2]) : -1;
+        console.log('Callback:', act, aid, oi, '| Pending:', pendingApprovals.size);
         await answerCB(up.callback_query.id);
 
         if (act === 'rr') {
