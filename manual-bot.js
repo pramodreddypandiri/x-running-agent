@@ -95,7 +95,8 @@ async function answerCB(id) {
 async function generateComments(tweetText, tweetAuthor, strategy, gp) {
   const fc = buildFeedbackContext();
   const vp = loadText(VIRAL_PATH) || 'No viral data yet.';
-  const prompt = gp.replace('{FEEDBACK_CONTEXT}', fc).replace('{VIRAL_PATTERNS}', vp).replace('{LIST_STRATEGY}', strategy).replace('{AUTHOR}', tweetAuthor).replace('{TWEET_TEXT}', tweetText);
+  const currentWork = loadText('./prompts/current-work.txt').replace(/^#.*$/gm, '').trim();
+  const prompt = gp.replace('{FEEDBACK_CONTEXT}', fc).replace('{VIRAL_PATTERNS}', vp).replace('{LIST_STRATEGY}', strategy).replace('{AUTHOR}', tweetAuthor).replace('{TWEET_TEXT}', tweetText).replace('{CURRENT_WORK}', currentWork || 'No current work context available.');
   const r = await fetch('https://api.anthropic.com/v1/messages', {
     method:'POST', headers:{'Content-Type':'application/json','x-api-key':API_KEY,'anthropic-version':'2023-06-01'},
     body: JSON.stringify({model:'claude-sonnet-4-20250514', max_tokens:800, messages:[{role:'user',content:prompt}]})

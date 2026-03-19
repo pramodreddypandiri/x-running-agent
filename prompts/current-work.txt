@@ -1,0 +1,9 @@
+# PRAMOD'S CURRENT WORK & FOCUS
+# Update this every few days to keep posts and comments authentic.
+# The bots inject this into prompts as {CURRENT_WORK}.
+# You can also update via Telegram: /work <your current focus>
+
+- Started exploring evaluations in AI generation — figuring out how to measure whether LLM outputs are actually good vs just fluent
+- Working on a new project (details TBD)
+- Still deep in context engineering — specifically how to structure context for coding agents on large codebases
+- Running this X agent and iterating on the prompts based on what comments land well

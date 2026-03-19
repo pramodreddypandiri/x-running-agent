@@ -126,7 +126,8 @@ async function fetchFeeds(feeds) {
 async function generatePostOptions(stories, promptTemplate) {
   const context = stories.map(s => '- ' + s.title + ' [' + s.source + ']').join('\n');
   const feedbackCtx = buildPostFeedback();
-  const prompt = promptTemplate.replace('{RSS_CONTEXT}', context).replace('{POST_FEEDBACK}', feedbackCtx);
+  const currentWork = loadText('./prompts/current-work.txt').replace(/^#.*$/gm, '').trim();
+  const prompt = promptTemplate.replace('{RSS_CONTEXT}', context).replace('{POST_FEEDBACK}', feedbackCtx).replace('{CURRENT_WORK}', currentWork || 'No current work context available.');
 
   const r = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',

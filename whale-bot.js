@@ -276,7 +276,24 @@ async function checkTGCommands() {
         await sendTG(msg);
       }
       else if (cmd === '/whelp') {
-        await sendTG('🐋 <b>Whale Bot Commands</b>\n\n/wstart — Resume\n/wstop — Pause\n/wstats — Stats\n/wfeedback — Feedback stats\n/whelp — This message');
+        await sendTG('🐋 <b>Whale Bot Commands</b>\n\n/wstart — Resume\n/wstop — Pause\n/wstats — Stats\n/wfeedback — Feedback stats\n/work — View current work context\n/work &lt;text&gt; — Add to current work\n/work set &lt;text&gt; — Replace current work\n/whelp — This message');
+      }
+      else if (cmd === '/work') {
+        const currentWork = loadText('./prompts/current-work.txt').replace(/^#.*$/gm, '').trim();
+        await sendTG('📋 <b>Current work context:</b>\n\n' + (currentWork || '(empty)') + '\n\n<i>To update, send:</i>\n/work set your new focus here');
+      }
+      else if (cmd.startsWith('/work set ') || cmd.startsWith('/work ')) {
+        const newWork = txt.substring(txt.indexOf(' ', 6) !== -1 ? txt.indexOf(' ', 6) + 1 : 6).trim();
+        if (txt.toLowerCase().startsWith('/work set ')) {
+          // Full replace
+          const header = '# PRAMOD\'S CURRENT WORK & FOCUS\n# Update this every few days to keep posts and comments authentic.\n# The bots inject this into prompts as {CURRENT_WORK}.\n# You can also update via Telegram: /work <your current focus>\n\n';
+          fs.writeFileSync('./prompts/current-work.txt', header + newWork + '\n');
+          await sendTG('✅ <b>Current work updated!</b>\n\n' + newWork);
+        } else {
+          // Append
+          fs.appendFileSync('./prompts/current-work.txt', '\n- ' + txt.substring(6).trim() + '\n');
+          await sendTG('✅ <b>Added to current work:</b>\n- ' + txt.substring(6).trim());
+        }
       }
       else if (cmd === '/wfeedback') {
         const wfb = loadWhaleFeedback();
@@ -315,12 +332,14 @@ async function generateComment(tweetText, tweetAuthor, gp) {
   
   const strategy = 'Comment as a peer entrepreneur on a whale account. Your goal is VISIBILITY. Write the comment that gets the most likes and replies. Be sharp, genuine, add unexpected value or a contrarian take. Short sentences. No fluff. Sound like you\'re texting a friend who happens to be brilliant. The best comments on whale tweets are either: (1) adding a data point nobody mentioned, (2) a genuinely funny one-liner, (3) a real experience that adds nuance, or (4) a smart question that makes people think.';
   
+  const currentWork = loadText('./prompts/current-work.txt').replace(/^#.*$/gm, '').trim();
   const prompt = gp
     .replace('{FEEDBACK_CONTEXT}', fbCtx || 'No feedback yet.')
     .replace('{VIRAL_PATTERNS}', 'Focus on being early and sharp.')
     .replace('{LIST_STRATEGY}', strategy)
     .replace('{AUTHOR}', tweetAuthor)
-    .replace('{TWEET_TEXT}', tweetText);
+    .replace('{TWEET_TEXT}', tweetText)
+    .replace('{CURRENT_WORK}', currentWork || 'No current work context available.');
 
   try {
     const r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -697,6 +716,23 @@ async function main() {
       // Check for replies to our comments every cycle
       if (!currentState.paused) {
         try { await checkForReplies(page); } catch(e) { console.log('Reply check error: ' + e.message.substring(0, 50)); }
+      }
+
+      // 2-day reminder to update current work context
+      const WORK_REMINDER_INTERVAL = 2 * 24 * 60 * 60 * 1000; // 2 days
+      const wState = loadState();
+      const lastReminder = wState.lastWorkReminder || 0;
+      if (Date.now() - lastReminder > WORK_REMINDER_INTERVAL) {
+        const currentWork = loadText('./prompts/current-work.txt').replace(/^#.*$/gm, '').trim();
+        await sendTG(
+          '🔄 <b>Time to update your current work context!</b>\n\n' +
+          '<b>Current:</b>\n' + (currentWork || '(empty)') + '\n\n' +
+          'Still accurate? If not, send:\n' +
+          '/work set &lt;your updated focus&gt;\n' +
+          'Or add with: /work &lt;new thing&gt;'
+        );
+        wState.lastWorkReminder = Date.now();
+        saveState(wState);
       }
 
       // Wait before next check
