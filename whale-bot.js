@@ -361,6 +361,13 @@ async function generateComment(tweetText, tweetAuthor, gp, listStrategy) {
     }
     if (d && d.content && d.content[0]) {
       const text = d.content[0].text.trim();
+
+      // Handle SKIP response
+      if (text === 'SKIP' || text.startsWith('SKIP')) {
+        console.log('Claude said SKIP — skipping this tweet');
+        return null;
+      }
+
       const lines = text.split('\n').filter(l => l.trim());
       // Pick one randomly from options A-E
       const opts = [];
@@ -372,19 +379,24 @@ async function generateComment(tweetText, tweetAuthor, gp, listStrategy) {
         } else if (cur) { cur += ' ' + line.trim(); }
       }
       if (cur) opts.push(cur.trim());
-      
-      if (opts.length > 0) {
+
+      // Filter out SKIP options and obviously broken responses
+      const valid = opts.filter(o => o !== 'SKIP' && !o.startsWith('SKIP') && !o.toLowerCase().includes('i need to see') && !o.toLowerCase().includes('please provide') && !o.toLowerCase().includes('voice prompt'));
+
+      if (valid.length > 0) {
         // Pick randomly but weight toward A (one-liner) and C (experience) for speed
         const weights = [0.3, 0.15, 0.3, 0.15, 0.1];
         let rand = Math.random();
         let pick = 0;
-        for (let i = 0; i < weights.length && i < opts.length; i++) {
+        for (let i = 0; i < weights.length && i < valid.length; i++) {
           rand -= weights[i];
           if (rand <= 0) { pick = i; break; }
         }
-        return opts[Math.min(pick, opts.length - 1)];
+        return valid[Math.min(pick, valid.length - 1)];
       }
-      return text.split('\n')[0].replace(/^[A-E]:\s*/, '').replace(/^["']|["']$/g, '');
+      // All options were SKIP or invalid
+      console.log('All options were SKIP or invalid');
+      return null;
     }
   } catch(e) { console.error('Claude error:', e.message); }
   return null;
