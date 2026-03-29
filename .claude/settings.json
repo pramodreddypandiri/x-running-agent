@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -c /Users/pramodreddypandiri/Desktop/Projects/X-Running-Agent/whale-bot.js)",
+      "Bash(node -c /Users/pramodreddypandiri/Desktop/Projects/X-Running-Agent/manual-bot.js)",
+      "Bash(node -c /Users/pramodreddypandiri/Desktop/Projects/X-Running-Agent/post-scheduler.js)"
+    ]
+  }
+}

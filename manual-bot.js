@@ -97,12 +97,24 @@ async function generateComments(tweetText, tweetAuthor, strategy, gp) {
   const vp = loadText(VIRAL_PATH) || 'No viral data yet.';
   const currentWork = loadText('./prompts/current-work.txt').replace(/^#.*$/gm, '').trim();
   const prompt = gp.replace('{FEEDBACK_CONTEXT}', fc).replace('{VIRAL_PATTERNS}', vp).replace('{LIST_STRATEGY}', strategy).replace('{AUTHOR}', tweetAuthor).replace('{TWEET_TEXT}', tweetText).replace('{CURRENT_WORK}', currentWork || 'No current work context available.');
-  const r = await fetch('https://api.anthropic.com/v1/messages', {
-    method:'POST', headers:{'Content-Type':'application/json','x-api-key':API_KEY,'anthropic-version':'2023-06-01'},
-    body: JSON.stringify({model:'claude-sonnet-4-20250514', max_tokens:800, messages:[{role:'user',content:prompt}]})
-  });
-  const d = await r.json();
-  if (d.content && d.content[0]) {
+  let d = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST', headers:{'Content-Type':'application/json','x-api-key':API_KEY,'anthropic-version':'2023-06-01'},
+      body: JSON.stringify({model:'claude-sonnet-4-20250514', max_tokens:800, messages:[{role:'user',content:prompt}]})
+    });
+    d = await r.json();
+    if (d.content && d.content[0]) break;
+    if (d.error && d.error.type === 'overloaded_error') {
+      const wait = (attempt + 1) * 10;
+      console.log('API overloaded, retrying in ' + wait + 's (attempt ' + (attempt+1) + '/3)');
+      await new Promise(resolve => setTimeout(resolve, wait * 1000));
+    } else {
+      console.error('Claude API error:', JSON.stringify(d));
+      break;
+    }
+  }
+  if (d && d.content && d.content[0]) {
     const t = d.content[0].text.trim(); const opts = []; const lines = t.split('\n').filter(l=>l.trim()); let cur = '';
     for (const line of lines) { if(line.match(/^[A-E]:/)){if(cur)opts.push(cur.trim());cur=line.replace(/^[A-E]:\s*/,'').replace(/^["']|["']$/g,'');}else if(cur){cur+=' '+line.trim();} }
     if (cur) opts.push(cur.trim());
@@ -498,8 +510,12 @@ async function main() {
             console.log('New: @' + tw.author);
             await randomLike(page, tw);
             const comments = await generateComments(tw.text, tw.author, list.strategy, gp);
-            if (comments && comments.length > 0) await requestApproval(tw, comments, list.name);
-            seen.add(tw.tweetUrl); saveSeenTweets(seen);
+            if (comments && comments.length > 0) {
+              await requestApproval(tw, comments, list.name);
+              seen.add(tw.tweetUrl); saveSeenTweets(seen);
+            } else {
+              console.log('No comments generated for @' + tw.author + ' — will retry next cycle');
+            }
             await page.waitForTimeout(2000 + Math.random()*3000);
           }
         }

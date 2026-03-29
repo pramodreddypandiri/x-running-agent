@@ -129,13 +129,25 @@ async function generatePostOptions(stories, promptTemplate) {
   const currentWork = loadText('./prompts/current-work.txt').replace(/^#.*$/gm, '').trim();
   const prompt = promptTemplate.replace('{RSS_CONTEXT}', context).replace('{POST_FEEDBACK}', feedbackCtx).replace('{CURRENT_WORK}', currentWork || 'No current work context available.');
 
-  const r = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01' },
-    body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 600, messages: [{ role: 'user', content: prompt }] })
-  });
-  const d = await r.json();
-  if (!d.content || !d.content[0]) { console.error('Claude error:', d); return null; }
+  let d = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 600, messages: [{ role: 'user', content: prompt }] })
+    });
+    d = await r.json();
+    if (d.content && d.content[0]) break;
+    if (d.error && d.error.type === 'overloaded_error') {
+      const wait = (attempt + 1) * 10;
+      console.log('API overloaded, retrying in ' + wait + 's (attempt ' + (attempt+1) + '/3)');
+      await new Promise(resolve => setTimeout(resolve, wait * 1000));
+    } else {
+      console.error('Claude API error:', JSON.stringify(d));
+      return null;
+    }
+  }
+  if (!d || !d.content || !d.content[0]) { console.error('Claude failed after retries:', JSON.stringify(d)); return null; }
 
   const text = d.content[0].text.trim();
   const opts = [];

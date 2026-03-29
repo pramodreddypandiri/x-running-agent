@@ -11,8 +11,9 @@ const WHALE_LOG_PATH = "./data/whale-logs.json";
 const SEEN_PATH = "./data/whale-seen.json";
 const WATCH_PATH = "./data/whale-watch.json";
 
+const CONFIG_PATH = './config.json';
+
 // ─── CONFIG ───
-const LIST_URL = process.env.WHALE_LIST_URL || 'https://x.com/i/lists/YOUR_LIST_ID';
 const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TG_CHAT = process.env.TELEGRAM_CHAT_ID;
 const API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -307,7 +308,7 @@ async function checkTGCommands() {
 }
 
 // ─── CLAUDE COMMENT GENERATION ───
-async function generateComment(tweetText, tweetAuthor, gp) {
+async function generateComment(tweetText, tweetAuthor, gp, listStrategy) {
   const fb = loadFeedback();
   const wfb = loadWhaleFeedback();
   let fbCtx = '';
@@ -330,25 +331,35 @@ async function generateComment(tweetText, tweetAuthor, gp) {
     });
   }
   
-  const strategy = 'Comment as a peer entrepreneur on a whale account. Your goal is VISIBILITY. Write the comment that gets the most likes and replies. Be sharp, genuine, add unexpected value or a contrarian take. Short sentences. No fluff. Sound like you\'re texting a friend who happens to be brilliant. The best comments on whale tweets are either: (1) adding a data point nobody mentioned, (2) a genuinely funny one-liner, (3) a real experience that adds nuance, or (4) a smart question that makes people think.';
-  
   const currentWork = loadText('./prompts/current-work.txt').replace(/^#.*$/gm, '').trim();
   const prompt = gp
     .replace('{FEEDBACK_CONTEXT}', fbCtx || 'No feedback yet.')
     .replace('{VIRAL_PATTERNS}', 'Focus on being early and sharp.')
-    .replace('{LIST_STRATEGY}', strategy)
+    .replace('{LIST_STRATEGY}', listStrategy)
     .replace('{AUTHOR}', tweetAuthor)
     .replace('{TWEET_TEXT}', tweetText)
     .replace('{CURRENT_WORK}', currentWork || 'No current work context available.');
 
   try {
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 400, messages: [{ role: 'user', content: prompt }] })
-    });
-    const d = await r.json();
-    if (d.content && d.content[0]) {
+    let d = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const r = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 400, messages: [{ role: 'user', content: prompt }] })
+      });
+      d = await r.json();
+      if (d.content && d.content[0]) break;
+      if (d.error && d.error.type === 'overloaded_error') {
+        const wait = (attempt + 1) * 10;
+        console.log('API overloaded, retrying in ' + wait + 's (attempt ' + (attempt+1) + '/3)');
+        await new Promise(resolve => setTimeout(resolve, wait * 1000));
+      } else {
+        console.error('Claude API error:', JSON.stringify(d));
+        return null;
+      }
+    }
+    if (d && d.content && d.content[0]) {
       const text = d.content[0].text.trim();
       const lines = text.split('\n').filter(l => l.trim());
       // Pick one randomly from options A-E
@@ -380,8 +391,8 @@ async function generateComment(tweetText, tweetAuthor, gp) {
 }
 
 // ─── SCRAPE LIST ───
-async function scrapeList(page) {
-  await page.goto(LIST_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+async function scrapeList(page, listUrl) {
+  await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForTimeout(3000);
   await page.evaluate(() => window.scrollBy(0, 500));
   await page.waitForTimeout(2000);
@@ -575,13 +586,24 @@ RULES:
 Write exactly 1 reply. Just the text, nothing else.`;
 
   try {
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 150, messages: [{ role: 'user', content: prompt }] })
-    });
-    const d = await r.json();
-    if (d.content && d.content[0]) return d.content[0].text.trim().replace(/^["']|["']$/g, '');
+    let d = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const r = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 150, messages: [{ role: 'user', content: prompt }] })
+      });
+      d = await r.json();
+      if (d.content && d.content[0]) return d.content[0].text.trim().replace(/^["']|["']$/g, '');
+      if (d.error && d.error.type === 'overloaded_error') {
+        const wait = (attempt + 1) * 10;
+        console.log('Reply API overloaded, retrying in ' + wait + 's (attempt ' + (attempt+1) + '/3)');
+        await new Promise(resolve => setTimeout(resolve, wait * 1000));
+      } else {
+        console.error('Reply API error:', JSON.stringify(d));
+        break;
+      }
+    }
   } catch(e) { console.error('Reply gen error:', e.message); }
   return null;
 }
@@ -612,9 +634,12 @@ async function main() {
   const dayKey = new Date().toISOString().split('T')[0];
   const dayCount = logs.daily[dayKey] || 0;
 
+  const config = loadJSON(CONFIG_PATH, { lists: [] });
+  const lists = config.lists || [];
+
   await sendTG(
     '🐋 <b>Whale Auto-Commenter online!</b>\n\n' +
-    '• Monitoring: ' + LIST_URL.split('/').pop() + '\n' +
+    '• Monitoring: ' + lists.length + ' lists (' + lists.map(l => l.name).join(', ') + ')\n' +
     '• Limits: ' + MAX_PER_HOUR + '/hr, ' + MAX_PER_DAY + '/day\n' +
     '• Today so far: ' + dayCount + ' comments\n' +
     '• State: ' + (state.paused ? 'PAUSED' : 'RUNNING') + '\n\n' +
@@ -632,69 +657,73 @@ async function main() {
         const rateCheck = canComment(currentLogs);
         
         if (rateCheck.ok) {
-          const tweets = await scrapeList(page);
-          console.log('Found ' + tweets.length + ' tweets');
+          const config = loadJSON(CONFIG_PATH, { lists: [] });
+          const lists = config.lists || [];
 
-          for (const tw of tweets) {
-            if (seen.has(tw.tweetUrl)) continue;
-            
-            // Only original tweets, not too old
-            if (tw.time) {
-              const age = Date.now() - new Date(tw.time).getTime();
-              if (age > MAX_TWEET_AGE_MS) { seen.add(tw.tweetUrl); continue; }
-            }
-            
-            // Skip own tweets
-            if (tw.author.toLowerCase() === (process.env.X_USERNAME || 'your_username')) { seen.add(tw.tweetUrl); continue; }
-            
-            // Check rate limits again
-            const freshLogs = loadLogs();
-            const check = canComment(freshLogs);
-            if (!check.ok) { console.log('Rate limit: ' + check.reason); break; }
-            
-            // Check same author cooldown
-            if (!canCommentOnAuthor(freshLogs, tw.author)) {
-              console.log('Skipping @' + tw.author + ' (commented recently)');
-              seen.add(tw.tweetUrl);
-              continue;
-            }
-            
-            // Random skip 20%
-            if (Math.random() < RANDOM_SKIP_RATE) {
-              console.log('Random skip @' + tw.author);
-              seen.add(tw.tweetUrl);
-              continue;
-            }
-            
-            console.log('New tweet from @' + tw.author);
-            
-            // Generate comment
-            const comment = await generateComment(tw.text, tw.author, gp);
-            if (!comment) { console.log('Failed to generate comment'); seen.add(tw.tweetUrl); continue; }
-            
-            // Human-like delay before posting
-            const delay = (PRE_COMMENT_DELAY_MIN + Math.random() * (PRE_COMMENT_DELAY_MAX - PRE_COMMENT_DELAY_MIN)) * 1000;
-            console.log('Waiting ' + Math.round(delay / 1000) + 's before posting...');
-            await page.waitForTimeout(delay);
-            
-            // Post comment
-            try {
-              await postComment(page, tw.tweetUrl, comment);
-              recordComment(freshLogs, tw.author, tw.tweetUrl, comment);
-              seen.add(tw.tweetUrl);
-              saveSeen(seen);
-              
-              console.log('✅ Posted on @' + tw.author);
-              addToWatchlist(tw.tweetUrl, tw.author, comment);
-              const commentId = Date.now().toString();
-              pendingActions.set(commentId, { author: tw.author, tweetUrl: tw.tweetUrl, comment, waitingFeedback: false, deleteAfter: false });
-              await sendTG(
-                '🐋 <b>Auto-commented on @' + tw.author + '</b>\n\n' +
-                '💬 ' + comment + '\n\n' +
-                '🔗 ' + tw.tweetUrl,
-                { inline_keyboard: [
-                  [{ text: '✅ Good', callback_data: 'wok_' + commentId }, { text: '💬 Feedback', callback_data: 'wfb_' + commentId }, { text: '🗑 Delete', callback_data: 'wdel_' + commentId }]
-                ]}
+          for (const list of lists) {
+            const tweets = await scrapeList(page, list.url);
+            console.log('Found ' + tweets.length + ' in "' + list.name + '"');
+
+            for (const tw of tweets) {
+              if (seen.has(tw.tweetUrl)) continue;
+
+              // Only original tweets, not too old
+              if (tw.time) {
+                const age = Date.now() - new Date(tw.time).getTime();
+                if (age > MAX_TWEET_AGE_MS) { seen.add(tw.tweetUrl); continue; }
+              }
+
+              // Skip own tweets
+              if (tw.author.toLowerCase() === (process.env.X_USERNAME || 'your_username')) { seen.add(tw.tweetUrl); continue; }
+
+              // Check rate limits again
+              const freshLogs = loadLogs();
+              const check = canComment(freshLogs);
+              if (!check.ok) { console.log('Rate limit: ' + check.reason); break; }
+
+              // Check same author cooldown
+              if (!canCommentOnAuthor(freshLogs, tw.author)) {
+                console.log('Skipping @' + tw.author + ' (commented recently)');
+                seen.add(tw.tweetUrl);
+                continue;
+              }
+
+              // Random skip 20%
+              if (Math.random() < RANDOM_SKIP_RATE) {
+                console.log('Random skip @' + tw.author);
+                seen.add(tw.tweetUrl);
+                continue;
+              }
+
+              console.log('New tweet from @' + tw.author + ' [' + list.name + ']');
+
+              // Generate comment with list-specific strategy
+              const comment = await generateComment(tw.text, tw.author, gp, list.strategy);
+              if (!comment) { console.log('Failed to generate comment'); continue; }
+
+              // Human-like delay before posting
+              const delay = (PRE_COMMENT_DELAY_MIN + Math.random() * (PRE_COMMENT_DELAY_MAX - PRE_COMMENT_DELAY_MIN)) * 1000;
+              console.log('Waiting ' + Math.round(delay / 1000) + 's before posting...');
+              await page.waitForTimeout(delay);
+
+              // Post comment
+              try {
+                await postComment(page, tw.tweetUrl, comment);
+                recordComment(freshLogs, tw.author, tw.tweetUrl, comment);
+                seen.add(tw.tweetUrl);
+                saveSeen(seen);
+
+                console.log('✅ Posted on @' + tw.author + ' [' + list.name + ']');
+                addToWatchlist(tw.tweetUrl, tw.author, comment);
+                const commentId = Date.now().toString();
+                pendingActions.set(commentId, { author: tw.author, tweetUrl: tw.tweetUrl, comment, listName: list.name, waitingFeedback: false, deleteAfter: false });
+                await sendTG(
+                  '🐋 <b>Auto-commented on @' + tw.author + '</b> · <i>' + list.name + '</i>\n\n' +
+                  '💬 ' + comment + '\n\n' +
+                  '🔗 ' + tw.tweetUrl,
+                  { inline_keyboard: [
+                    [{ text: '✅ Good', callback_data: 'wok_' + commentId }, { text: '💬 Feedback', callback_data: 'wfb_' + commentId }, { text: '🗑 Delete', callback_data: 'wdel_' + commentId }]
+                  ]}
               );
             } catch(e) {
               console.log('Failed to post: ' + e.message);
@@ -703,8 +732,9 @@ async function main() {
               saveSeen(seen);
             }
             
-            // Only one comment per check cycle
-            break;
+              // Only one comment per check cycle
+              break;
+            }
           }
         } else {
           console.log('Rate limited: ' + rateCheck.reason);

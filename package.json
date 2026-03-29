@@ -9,7 +9,8 @@
     "post": "node post-scheduler.js",
     "setup-cookies": "node scripts/setup-cookies.js",
     "verify-accounts": "node scripts/verify-accounts.js",
-    "add-to-list": "node scripts/add-to-list.js"
+    "add-to-list": "node scripts/add-to-list.js",
+    "comment": "node comment-bot.js"
   },
   "keywords": [
     "twitter",
