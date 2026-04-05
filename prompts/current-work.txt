@@ -4,3 +4,5 @@
 # You can also update via Telegram: /work <your current focus>
 
 working on interview prep platform
+
+- working on AI powered interview prep platform.
