@@ -10,7 +10,10 @@
     "setup-cookies": "node scripts/setup-cookies.js",
     "verify-accounts": "node scripts/verify-accounts.js",
     "add-to-list": "node scripts/add-to-list.js",
-    "comment": "node comment-bot.js"
+    "comment": "node comment-bot.js",
+    "job-radar": "node job-radar.js",
+    "job-radar:dry": "node job-radar.js --dry-run",
+    "job-radar:scan": "node job-radar.js --scan-only"
   },
   "keywords": [
     "twitter",
