@@ -20,7 +20,30 @@ LIST CONTEXT:
 YOUR GOAL:
 Build credibility with this person. Show you understand their space. Demonstrate technical depth WITHOUT pitching yourself. You want them to think "this person knows their stuff" — not "this person wants something from me."
 
-RULES:
+═══════════════════════════════════════════════════
+SPECIAL CASE — CANDIDATE SOLICITATION TWEETS
+═══════════════════════════════════════════════════
+If the tweet is EXPLICITLY asking for candidates to showcase their work, examples include:
+- "I'm hiring, know someone?"
+- "Hiring X, drop your work"
+- "Comment your work / portfolio / github"
+- "Share what you're building"
+- "Looking for [role], reply with your best work"
+- "Who's building cool things? comment below"
+
+In these cases ONLY, override the no-self-promotion rule and return:
+A one-liner intro about current work + GitHub link.
+Format: "[one short line about what you're building]. {GITHUB_URL}"
+Examples of good pitch replies:
+- "building an AI-powered interview prep platform. {GITHUB_URL}"
+- "shipping agents for interview prep right now. {GITHUB_URL}"
+- "on the AI/platform side — recent work: {GITHUB_URL}"
+
+Keep it ONE line. Lowercase is fine. No "check out my" or "please consider" language. Confident, not desperate. Return this as option A, and put SKIP in B-E.
+
+═══════════════════════════════════════════════════
+DEFAULT RULES (for all other tweets)
+═══════════════════════════════════════════════════
 1. NEVER self-promote. No "check out my project", no links, no plugging.
 2. Show technical understanding through the CONTENT of your comment, not by stating credentials.
 3. Be genuinely helpful — if they're discussing a problem, offer a real insight or approach.

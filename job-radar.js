@@ -1,5 +1,6 @@
-// Job Radar Bot — scans "Startups and founders" list for hiring signals,
-// auto-follows, logs prospects, and builds credibility through smart engagement.
+// Job Radar Bot — scans any config.json list flagged with "jobRadar": true
+// for hiring signals, auto-follows, logs prospects, and builds credibility
+// through smart engagement.
 // Usage: node job-radar.js [--dry-run] [--scan-only]
 require('dotenv').config();
 const { chromium } = require('playwright');
@@ -60,6 +61,21 @@ const HIRING_KEYWORDS = [
   "careers page", "job opening", "job openings", "new role",
   "head of engineering", "hiring a", "hiring an",
 ];
+
+// Tweets explicitly asking candidates to showcase work — these are high-signal
+// opportunities where sharing the GitHub link is appropriate.
+const SOLICITATION_PATTERNS = [
+  /\bhiring\b.*(know someone|know anyone|drop your|share your|comment your|reply with)/i,
+  /(drop|share|comment|reply with).*(your work|your portfolio|your github|your projects|what you('re| are) building|cool things)/i,
+  /(looking for|need|want).*(engineer|developer|founding|builder).*(reply|comment|dm|drop)/i,
+  /who('s| is) building.*(comment|reply|below|share)/i,
+  /show me what you('re| are) building/i,
+];
+
+function isSolicitationTweet(text) {
+  if (!text) return false;
+  return SOLICITATION_PATTERNS.some(p => p.test(text));
+}
 
 const CAREERS_PATTERNS = [
   /(?:careers?|jobs?|positions?|openings?|hiring|work-with-us|join-us)[\w.-]*/i,
@@ -675,9 +691,10 @@ async function checkTGCommands() {
 }
 
 // ─── FULL PROFILE SCAN ───
-async function runProfileScan(page, listUrl) {
-  console.log('\n━━━ Starting full profile scan ━━━');
-  await sendTG('🔍 <b>Job Radar: Starting profile scan...</b>');
+async function runProfileScan(page, listUrl, listName) {
+  const label = listName ? ' (' + listName + ')' : '';
+  console.log('\n━━━ Starting full profile scan' + label + ' ━━━');
+  await sendTG('🔍 <b>Job Radar: Scanning' + label + '...</b>');
 
   const members = await scrapeListMembers(page, listUrl);
   if (members.length === 0) {
@@ -780,8 +797,11 @@ async function main() {
   ensureDirs();
 
   const config = loadJSON(CONFIG_PATH, { lists: [] });
-  const startupList = config.lists.find(l => l.name === 'Startups and founders');
-  if (!startupList) { console.error('No "Startups and founders" list in config.json'); process.exit(1); }
+  const targetLists = config.lists.filter(l => l.jobRadar === true);
+  if (targetLists.length === 0) {
+    console.error('No lists flagged with "jobRadar": true in config.json');
+    process.exit(1);
+  }
 
   const browser = await chromium.launch({
     headless: true,
@@ -812,7 +832,7 @@ async function main() {
 
   await sendTG(
     '🎯 <b>Job Radar online!</b>\n\n' +
-    '• Monitoring: ' + startupList.name + '\n' +
+    '• Monitoring: ' + targetLists.map(l => l.name).join(', ') + '\n' +
     '• Mode: ' + (DRY_RUN ? 'DRY RUN' : (SCAN_ONLY ? 'SCAN ONLY' : 'LIVE')) + '\n' +
     '• Comment limits: ' + MAX_PER_HOUR + '/hr, ' + MAX_PER_DAY + '/day\n' +
     '• Today so far: ' + (logs.daily[dayKey] || 0) + ' comments\n' +
@@ -820,9 +840,11 @@ async function main() {
     '/jrstop /jrstart /jrstats /jrscan /jrprospects /jrhelp'
   );
 
-  // If scan-only mode, just run scan and exit
+  // If scan-only mode, scan all target lists and exit
   if (SCAN_ONLY) {
-    await runProfileScan(page, startupList.url);
+    for (const list of targetLists) {
+      await runProfileScan(page, list.url, list.name);
+    }
     await browser.close();
     return;
   }
@@ -847,19 +869,26 @@ async function main() {
         continue;
       }
 
-      // Check if it's time for a full profile scan
+      // Check if it's time for a full profile scan — scan every target list
       const timeSinceScan = Date.now() - (currentState.lastScan || 0);
       if (timeSinceScan >= SCAN_INTERVAL_MS) {
-        await runProfileScan(page, startupList.url);
+        for (const list of targetLists) {
+          await runProfileScan(page, list.url, list.name);
+        }
       }
 
-      // Scrape list for new tweets and engage
+      // Scrape each target list for new tweets and engage
       const currentLogs = loadLogs();
       const rateCheck = canComment(currentLogs);
 
+      let postedThisCycle = false;
+
       if (rateCheck.ok) {
-        const tweets = await scrapeList(page, startupList.url);
-        console.log('Found ' + tweets.length + ' tweets in "' + startupList.name + '"');
+       for (const currentList of targetLists) {
+        if (postedThisCycle) break;
+
+        const tweets = await scrapeList(page, currentList.url);
+        console.log('Found ' + tweets.length + ' tweets in "' + currentList.name + '"');
 
         for (const tw of tweets) {
           if (seen.has(tw.tweetUrl)) continue;
@@ -881,14 +910,18 @@ async function main() {
           const check = canComment(freshLogs);
           if (!check.ok) { console.log('Rate limit: ' + check.reason); break; }
 
-          if (!canCommentOnAuthor(freshLogs, tw.author)) {
+          // Detect candidate-solicitation tweets — these bypass selective skip
+          // and same-author cooldown because they're explicit asks for candidates.
+          const isSolicitation = isSolicitationTweet(tw.text);
+
+          if (!isSolicitation && !canCommentOnAuthor(freshLogs, tw.author)) {
             console.log('Skipping @' + tw.author + ' (commented recently)');
             seen.add(tw.tweetUrl);
             continue;
           }
 
-          // Higher random skip — be selective
-          if (Math.random() < RANDOM_SKIP_RATE) {
+          // Higher random skip — be selective. Solicitations bypass this.
+          if (!isSolicitation && Math.random() < RANDOM_SKIP_RATE) {
             console.log('Selective skip @' + tw.author);
             seen.add(tw.tweetUrl);
             continue;
@@ -899,10 +932,13 @@ async function main() {
           const authorBio = profileCtx ? profileCtx.bio : '';
           const authorCompany = profileCtx ? profileCtx.company : '';
 
-          console.log('Engaging with @' + tw.author + (profileCtx && profileCtx.isHiring ? ' [HIRING]' : ''));
+          const flags = [];
+          if (profileCtx && profileCtx.isHiring) flags.push('HIRING');
+          if (isSolicitation) flags.push('SOLICITATION');
+          console.log('Engaging with @' + tw.author + (flags.length ? ' [' + flags.join(', ') + ']' : ''));
 
           const comment = await generateEngagement(
-            tw.text, tw.author, authorBio, authorCompany, startupList.strategy
+            tw.text, tw.author, authorBio, authorCompany, currentList.strategy
           );
 
           if (!comment) {
@@ -922,16 +958,19 @@ async function main() {
             seen.add(tw.tweetUrl);
             saveSeen(seen);
 
-            console.log('✅ Engaged with @' + tw.author);
+            console.log('✅ Engaged with @' + tw.author + ' [' + currentList.name + ']');
             const commentId = Date.now().toString();
             pendingActions.set(commentId, {
               author: tw.author, tweetUrl: tw.tweetUrl, comment,
               waitingFeedback: false
             });
 
+            const tgFlags = [];
+            if (profileCtx && profileCtx.isHiring) tgFlags.push('HIRING');
+            if (isSolicitation) tgFlags.push('🎤 PITCH REPLY');
             await sendTG(
-              '🎯 <b>Job Radar commented on @' + tw.author + '</b>' +
-              (profileCtx && profileCtx.isHiring ? ' [HIRING]' : '') + '\n\n' +
+              '🎯 <b>Job Radar commented on @' + tw.author + '</b> · <i>' + currentList.name + '</i>' +
+              (tgFlags.length ? ' [' + tgFlags.join(', ') + ']' : '') + '\n\n' +
               '💬 ' + comment + '\n\n' +
               '🔗 ' + tw.tweetUrl,
               { inline_keyboard: [
@@ -939,15 +978,17 @@ async function main() {
                  { text: '💬 Feedback', callback_data: 'jrfb_' + commentId }]
               ]}
             );
+            postedThisCycle = true;
           } catch (e) {
             console.log('Failed to post: ' + e.message);
             seen.add(tw.tweetUrl);
             saveSeen(seen);
           }
 
-          // One comment per cycle
+          // One comment per cycle (across all lists)
           break;
         }
+       }
       } else {
         console.log('Rate limited: ' + rateCheck.reason);
       }
