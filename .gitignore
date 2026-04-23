@@ -7,3 +7,4 @@ prompts/whale-prompt.txt
 prompts/manual-prompt.txt
 config.json
 *.log
+/jobs/
