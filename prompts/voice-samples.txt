@@ -1,0 +1,46 @@
+# RECENT TWEETS BY PRAMOD (VOICE ANCHOR)
+# Auto-generated from data/my-tweets-corpus.json by scripts/build-voice-samples.js
+# These are real things Pramod said on X that got engagement.
+# Use them to calibrate register, length, sharpness, vocabulary.
+# Last updated: 2026-04-26
+
+- Any reason they extended it specifically for Miami? Track surface issues?
+- Are you seeing consistent results or is it still hit-or-miss with complex scenes?
+- The talent density at OpenAI is honestly wild.
+- The engineering to make that much mass controllable is genuinely insane.
+- The gap between "it works on my machine" and "customers will pay for this" is still pretty wide though.
+- The tools are great but honestly most value comes from learning to prompt them well, not just having access.
+- That 72.8% is already making me reconsider my current workflow.
+- I'm 25 and still trying to get VCs to respond to emails. The building part though - that's the same regardless of age.
+- Been there. Got rejected from App Store right when I needed momentum. The gap between "building cool stuff" and "paying rent" is real.
+- The fact that Franco's organizing team events already tells you everything about why he fits so well.
+- Wonder if they're planning a completely different approach to race strategy with his endurance racing background?
+- Someone definitely asked Claude to buy their coworker's leftover lunch and it probably wrote a 3-paragraph proposal.
+- That's huge! Istanbul Park has some of the most iconic corners in F1. Turn 8 is going to be mental with these current cars
+- Been thinking about X API for my interview prep platform - curious how the trending detection actually performs vs just monitoring specific keywords.
+- That Einhell partnership was such a good fit - tools for the people who build the fastest things on earth.
+- Haha wrong thread mate but I'm not complaining - more Yuki content is always welcome
+- Are we getting the full wet weather chaos package this year?
+- What counts as "using AI" though? Copilot suggestions, or actually architecting with LLMs?
+- The enterprise relationship angle is smart - way easier to expand within existing accounts than cold outreach for something this ambitious.
+- Is this the banking partnership everyone's been talking about?
+- Plot twist: he's talking about his Ferrari, not himself.
+- Bold claim. What specific use case made you realize this was different from every other tool launch?
+- Smooth Operator" feels too obvious but probably correct.
+- Wait, I think you got me confused with someone else I'm just here appreciating the superhero naming potential
+- Hot take: Plans let the past drive the future. They put blinders on you
+- What was the biggest surprise in your debugging process?
+- Plot twist: the customer call is about ordering lunch.
+- Are they hiring remote or is the 2am thing part of the culture they're selecting for?
+- What's the inference speed like compared to the closed models at similar quality?
+- Oh wow, that's a big transition! Are you jumping into something new or taking time to figure out the next move?
+- How's the car feeling after all the travel? Setup changes for the altitude?
+- The "load balancing" excuse for model degradation is wild. Either the model changed or it didn't.
+- I've restarted coding projects way too many times thinking a clean slate would help. The messy progress is usually more valuable than it looks.
+- Both French companies. There's probably an interesting story about why France kept leading quadcopter innovation for 100+ years.
+- Those banking angles at that speed never get old.
+- The salary range is smart - captures the group that actually has decisions to optimize, not just survival mode.
+- Been pitching an interview prep platform lately. The AI angle gets interest but the execution details are what get follow-ups.
+- The wifi was probably terrible anyway.
+- Dating apps are literally designed by the same growth hackers who built social media. The addiction isn't a bug.
+- The anticipation in "bizarre" is doing a lot of work here.

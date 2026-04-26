@@ -1,6 +1,8 @@
 require('dotenv').config();
 const { chromium } = require('playwright');
 const fs = require('fs');
+const { scrapeMyTweets } = require('./scripts/scrape-my-tweets');
+const { buildVoiceSamples } = require('./scripts/build-voice-samples');
 
 // ─── PATHS ───
 const SESSION_PATH = process.env.SESSION_PATH || "./x-session.json";
@@ -59,14 +61,83 @@ function loadFeedback() { return loadJSON(FEEDBACK_PATH, { approvals: [], reject
 const WHALE_FB_PATH = './data/whale-feedback.json';
 function loadWhaleFeedback() { return loadJSON(WHALE_FB_PATH, { feedback: [] }); }
 function saveWhaleFeedback(f) { saveJSON(WHALE_FB_PATH, f); }
-function addWhaleFeedback(author, tweetUrl, comment, feedbackText, deleted) {
+function addWhaleFeedback(author, tweetUrl, comment, feedbackText, deleted, kind, rewrite) {
   const fb = loadWhaleFeedback();
-  fb.feedback.push({ date: new Date().toISOString(), author, tweetUrl, comment, feedback: feedbackText, deleted });
+  const entry = { date: new Date().toISOString(), author, tweetUrl, comment, feedback: feedbackText, deleted };
+  entry.kind = kind || (deleted ? 'deleted' : (feedbackText ? 'kept' : 'kept'));
+  if (rewrite) entry.rewrite = rewrite;
+  fb.feedback.push(entry);
   saveWhaleFeedback(fb);
 }
 
 // Pending feedback/delete actions
 const pendingActions = new Map();
+
+// ─── VOICE REFRESH ───
+async function runVoiceRefresh() {
+  if (refreshInProgress) {
+    await sendTG('⏳ A voice refresh is already running. Hang tight.');
+    return;
+  }
+  if (!ctxRef) {
+    await sendTG('❌ Browser context not ready yet.');
+    return;
+  }
+  refreshInProgress = true;
+
+  // load previous corpus to compute delta
+  const prevCorpus = loadJSON('./data/my-tweets-corpus.json', []);
+  const prevUrls = new Set(prevCorpus.map(t => t.url));
+
+  const handle = process.env.X_USERNAME || 'PramodReddy1606';
+  await sendTG('🔄 <b>Voice refresh starting</b>\nScraping @' + handle + '/with_replies — this takes ~5 min.');
+
+  let page = null;
+  try {
+    page = await ctxRef.newPage();
+
+    let lastReportedScroll = 0;
+    const result = await scrapeMyTweets({
+      page,
+      handle,
+      onProgress: async ({ scrolls, kept, oldestSeen }) => {
+        // throttle Telegram updates: every 25 scrolls
+        if (scrolls - lastReportedScroll >= 25) {
+          lastReportedScroll = scrolls;
+          const oldestStr = new Date(oldestSeen).toISOString().split('T')[0];
+          await sendTG('  scroll ' + scrolls + ' → ' + kept + ' kept · oldest=' + oldestStr);
+        }
+      },
+    });
+
+    const newUrls = result.tweets.map(t => t.url);
+    const added = newUrls.filter(u => !prevUrls.has(u)).length;
+    const removed = [...prevUrls].filter(u => !newUrls.includes(u)).length;
+
+    const build = buildVoiceSamples();
+
+    let msg = '✅ <b>Voice refresh done</b>\n\n';
+    msg += '📊 Corpus: ' + result.kept + ' tweets (was ' + prevCorpus.length + ')\n';
+    msg += '➕ New since last: ' + added + '\n';
+    if (removed > 0) msg += '➖ Aged out: ' + removed + '\n';
+    msg += '📝 Voice samples: ' + build.picked + ' picked\n';
+    msg += '🛑 Stop reason: ' + result.stopReason + ' (' + result.scrolls + ' scrolls)\n';
+
+    if (added > 0) {
+      const newTweets = result.tweets.filter(t => !prevUrls.has(t.url)).slice(0, 5);
+      msg += '\n<b>New top entries:</b>\n';
+      newTweets.forEach(t => {
+        msg += '• ' + t.text.replace(/\n/g, ' ').slice(0, 90) + '\n';
+      });
+    }
+    await sendTG(msg);
+  } catch (e) {
+    await sendTG('❌ Refresh failed: ' + (e && e.message ? e.message : String(e)));
+  } finally {
+    if (page) { try { await page.close(); } catch (e) {} }
+    refreshInProgress = false;
+  }
+}
 
 // ─── RATE LIMITING ───
 function canComment(logs) {
@@ -136,6 +207,8 @@ async function answerCB(id) {
 
 let tgOff = 0;
 let pageRef = null; // will be set in main()
+let ctxRef = null;  // will be set in main(), used to spawn fresh pages for /wrefresh
+let refreshInProgress = false;
 
 async function deleteComment(page, tweetUrl) {
   try {
@@ -193,14 +266,14 @@ async function checkTGCommands() {
         if (!pending) continue;
 
         if (action === 'wok') {
-          // Satisfied, no action needed
+          addWhaleFeedback(pending.author, pending.tweetUrl, pending.comment, '', false, 'approved');
           pendingActions.delete(id);
         }
         else if (action === 'wfb') {
-          // Wants to give feedback (keep comment)
+          // Wants to give feedback (keep comment). Prefix with ">>" to record a rewrite.
           pending.waitingFeedback = true;
           pending.deleteAfter = false;
-          await sendTG('💬 Type your feedback for this comment:');
+          await sendTG('💬 Type your feedback for this comment.\n<i>Tip: start with</i> <code>&gt;&gt;</code> <i>to give the rewrite you would have posted instead.</i>');
         }
         else if (action === 'wdel') {
           // Delete + ask for feedback
@@ -225,13 +298,21 @@ async function checkTGCommands() {
         const fbEntry = [...pendingActions.entries()].find(([k, p]) => p.waitingFeedback);
         if (fbEntry && !txt.startsWith('/')) {
           const [fbId, fbData] = fbEntry;
-          const feedbackText = txt === '.' ? '' : txt;
-          addWhaleFeedback(fbData.author, fbData.tweetUrl, fbData.comment, feedbackText, fbData.deleteAfter);
-          if (feedbackText) {
-            await sendTG('📝 Feedback saved' + (fbData.deleteAfter ? ' + comment deleted' : '') + '. Learning.');
+          let kind, feedbackText = '', rewriteText = null, ack;
+          if (txt.startsWith('>>')) {
+            rewriteText = txt.replace(/^>>\s*/, '').trim();
+            kind = 'rewrite';
+            ack = '🔁 Rewrite saved as positive example. Learning.';
+          } else if (txt === '.') {
+            kind = fbData.deleteAfter ? 'deleted' : 'kept';
+            ack = fbData.deleteAfter ? '🗑 Comment deleted.' : '👍 Got it.';
           } else {
-            await sendTG('🗑 Comment deleted.');
+            feedbackText = txt;
+            kind = fbData.deleteAfter ? 'deleted' : 'kept';
+            ack = '📝 Feedback saved' + (fbData.deleteAfter ? ' + comment deleted' : '') + '. Learning.';
           }
+          addWhaleFeedback(fbData.author, fbData.tweetUrl, fbData.comment, feedbackText, fbData.deleteAfter, kind, rewriteText);
+          await sendTG(ack);
           pendingActions.delete(fbId);
           continue;
         }
@@ -277,7 +358,11 @@ async function checkTGCommands() {
         await sendTG(msg);
       }
       else if (cmd === '/whelp') {
-        await sendTG('🐋 <b>Whale Bot Commands</b>\n\n/wstart — Resume\n/wstop — Pause\n/wstats — Stats\n/wfeedback — Feedback stats\n/work — View current work context\n/work &lt;text&gt; — Add to current work\n/work set &lt;text&gt; — Replace current work\n/whelp — This message');
+        await sendTG('🐋 <b>Whale Bot Commands</b>\n\n/wstart — Resume\n/wstop — Pause\n/wstats — Stats\n/wfeedback — Feedback stats\n/wrefresh — Re-scrape your X replies & rebuild voice samples\n/work — View current work context\n/work &lt;text&gt; — Add to current work\n/work set &lt;text&gt; — Replace current work\n/whelp — This message\n\n<b>Feedback buttons:</b>\n✅ Good — logged as positive example\n💬 Feedback — type a critique, OR start with <code>&gt;&gt;</code> to give the rewrite you would have posted\n🗑 Delete — removes comment + asks for reason');
+      }
+      else if (cmd === '/wrefresh') {
+        // run async so the polling loop isn't blocked
+        runVoiceRefresh().catch(e => console.error('wrefresh error:', e));
       }
       else if (cmd === '/work') {
         const currentWork = loadText('./prompts/current-work.txt').replace(/^#.*$/gm, '').trim();
@@ -298,8 +383,20 @@ async function checkTGCommands() {
       }
       else if (cmd === '/wfeedback') {
         const wfb = loadWhaleFeedback();
-        let msg = '📝 <b>Whale Feedback</b>\n\nTotal: ' + wfb.feedback.length + '\nDeleted: ' + wfb.feedback.filter(f => f.deleted).length + '\nKept with notes: ' + wfb.feedback.filter(f => !f.deleted && f.feedback).length + '\n';
-        if (wfb.feedback.length > 0) { msg += '\n<b>Recent:</b>\n'; wfb.feedback.slice(-5).forEach(f => { msg += '• @' + f.author + (f.deleted ? ' 🗑' : '') + ': ' + (f.feedback || '-').substring(0, 60) + '\n'; }); }
+        const all = wfb.feedback.map(f => ({ ...f, kind: f.kind || (f.deleted ? 'deleted' : 'kept') }));
+        const approved = all.filter(f => f.kind === 'approved').length;
+        const rewrites = all.filter(f => f.kind === 'rewrite').length;
+        const deleted = all.filter(f => f.kind === 'deleted').length;
+        const keptNote = all.filter(f => f.kind === 'kept' && f.feedback).length;
+        let msg = '📝 <b>Whale Feedback</b>\n\nTotal: ' + all.length + '\n✅ Approved: ' + approved + '\n🔁 Rewrites: ' + rewrites + '\n🗑 Deleted: ' + deleted + '\n💬 Kept w/ notes: ' + keptNote + '\n';
+        if (all.length > 0) {
+          msg += '\n<b>Recent:</b>\n';
+          all.slice(-5).forEach(f => {
+            const icon = f.kind === 'approved' ? '✅' : f.kind === 'rewrite' ? '🔁' : f.kind === 'deleted' ? '🗑' : '💬';
+            const detail = f.kind === 'rewrite' ? (f.rewrite || '').substring(0, 60) : (f.feedback || '-').substring(0, 60);
+            msg += icon + ' @' + f.author + ': ' + detail + '\n';
+          });
+        }
         await sendTG(msg);
       }
       }
@@ -322,23 +419,35 @@ async function generateComment(tweetText, tweetAuthor, gp, listStrategy) {
     fbCtx += 'PRAMOD REWRITES:\n';
     re.forEach(e => { fbCtx += '- "' + e.editedComment + '"\n'; });
   }
-  // Add whale-specific feedback
-  const wfbRecent = wfb.feedback.filter(f => f.feedback).slice(-10);
-  if (wfbRecent.length > 0) {
+  // Whale-specific feedback. Kinds: approved (Good tap), kept (kept with critique),
+  // deleted (deleted with reason), rewrite (Pramod said what he would have posted instead).
+  const wfbAll = wfb.feedback.map(f => ({ ...f, kind: f.kind || (f.deleted ? 'deleted' : 'kept') }));
+  const approvals = wfbAll.filter(f => f.kind === 'approved').slice(-8);
+  const rewrites = wfbAll.filter(f => f.kind === 'rewrite').slice(-6);
+  const corrections = wfbAll.filter(f => (f.kind === 'kept' || f.kind === 'deleted') && f.feedback).slice(-8);
+  if (approvals.length || rewrites.length || corrections.length) {
     fbCtx += '\nWHALE COMMENT FEEDBACK FROM PRAMOD:\n';
-    wfbRecent.forEach(f => {
-      fbCtx += '- ' + (f.deleted ? 'DELETED' : 'KEPT') + ' comment on @' + f.author + ': "' + f.comment.substring(0, 60) + '" → Feedback: "' + f.feedback + '"\n';
+    approvals.forEach(f => {
+      fbCtx += '- APPROVED on @' + f.author + ': "' + f.comment.substring(0, 120) + '"\n';
+    });
+    rewrites.forEach(f => {
+      fbCtx += '- REWRITE on @' + f.author + ': bot said "' + f.comment.substring(0, 80) + '" → Pramod would say: "' + (f.rewrite || '').substring(0, 160) + '"\n';
+    });
+    corrections.forEach(f => {
+      fbCtx += '- ' + (f.kind === 'deleted' ? 'DELETED' : 'KEPT-WITH-NOTE') + ' on @' + f.author + ': "' + f.comment.substring(0, 60) + '" → "' + f.feedback + '"\n';
     });
   }
   
   const currentWork = loadText('./prompts/current-work.txt').replace(/^#.*$/gm, '').trim();
+  const voiceSamples = loadText('./prompts/voice-samples.txt').replace(/^#.*$/gm, '').trim();
   const prompt = gp
     .replace('{FEEDBACK_CONTEXT}', fbCtx || 'No feedback yet.')
     .replace('{VIRAL_PATTERNS}', 'Focus on being early and sharp.')
     .replace('{LIST_STRATEGY}', listStrategy)
     .replace('{AUTHOR}', tweetAuthor)
     .replace('{TWEET_TEXT}', tweetText)
-    .replace('{CURRENT_WORK}', currentWork || 'No current work context available.');
+    .replace('{CURRENT_WORK}', currentWork || 'No current work context available.')
+    .replace('{VOICE_SAMPLES}', voiceSamples || 'No voice samples available yet.');
 
   try {
     let d = null;
@@ -641,6 +750,7 @@ async function main() {
   if ((await page.url()).includes('/login')) { await sendTG('❌ X session expired.'); process.exit(1); }
   console.log('Logged in!');
   pageRef = page;
+  ctxRef = ctx;
 
   const logs = loadLogs();
   const dayKey = new Date().toISOString().split('T')[0];
