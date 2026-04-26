@@ -1,111 +1,133 @@
 require('dotenv').config();
-const { chromium } = require('playwright');
 const fs = require('fs');
+const {
+  loadJSON, saveJSON, loadText, loadTextNoComments, loadSet, saveSet,
+  resolveTelegramAuth, requireEnv, getIdentity,
+  createTelegramClient,
+  callClaude, parseLetterOptions, weightedPick,
+  launchBrowser, verifyLogin,
+  scrapeList, postComment, deleteOwnComment,
+  makeRateLimiter, makePendingStore, buildFeedbackContext,
+} = require('./lib');
 const { scrapeMyTweets } = require('./scripts/scrape-my-tweets');
 const { buildVoiceSamples } = require('./scripts/build-voice-samples');
 
 // ─── PATHS ───
-const SESSION_PATH = process.env.SESSION_PATH || "./x-session.json";
-const PROMPT_PATH = process.env.WHALE_PROMPT_PATH || "./prompts/whale-prompt.txt";
-const FEEDBACK_PATH = "./data/feedback.json";
-const WHALE_STATE_PATH = "./data/whale-state.json";
-const WHALE_LOG_PATH = "./data/whale-logs.json";
-const SEEN_PATH = "./data/whale-seen.json";
-const WATCH_PATH = "./data/whale-watch.json";
-
-const CONFIG_PATH = './config.json';
+const SESSION_PATH = process.env.SESSION_PATH || './x-session.json';
+const PROMPT_PATH = process.env.WHALE_PROMPT_PATH || './prompts/whale-prompt.txt';
+const FEEDBACK_PATH = './data/feedback.json';
+const WHALE_FB_PATH = './data/whale-feedback.json';
+const WHALE_STATE_PATH = './data/whale-state.json';
+const WHALE_LOG_PATH = './data/whale-logs.json';
+const SEEN_PATH = './data/whale-seen.json';
+const WATCH_PATH = './data/whale-watch.json';
+const PENDING_PATH = './data/whale-pending.json';
+const CONFIG_PATH = process.env.CONFIG_PATH || './config.json';
+const CURRENT_WORK_PATH = './prompts/current-work.txt';
+const VOICE_SAMPLES_PATH = './prompts/voice-samples.txt';
+const CORPUS_PATH = './data/my-tweets-corpus.json';
 
 // ─── CONFIG ───
-const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TG_CHAT = process.env.TELEGRAM_CHAT_ID;
-const API_KEY = process.env.ANTHROPIC_API_KEY;
+const { token: TG_TOKEN, chatId: TG_CHAT } = resolveTelegramAuth('whale');
+const API_KEY = requireEnv('ANTHROPIC_API_KEY');
+const ME = getIdentity();
 
 // ─── AUTO-REPLY CONFIG ───
-const REPLY_CHECK_INTERVAL = 5 * 60 * 1000; // check for replies every 5 min
-const REPLY_WATCH_DURATION = 2 * 60 * 60 * 1000; // stop watching after 2 hours
-const MAX_REPLIES_PER_THREAD = 1; // only reply once per thread
-const REPLY_DELAY_MIN = 20; // seconds before replying
+const REPLY_WATCH_DURATION = 2 * 60 * 60 * 1000;
+const MAX_REPLIES_PER_THREAD = 1;
+const REPLY_DELAY_MIN = 20;
 const REPLY_DELAY_MAX = 60;
 
 // ─── SAFETY LIMITS ───
 const MAX_PER_HOUR = 15;
 const MAX_PER_DAY = 40;
-const MIN_GAP_MS = 3 * 60 * 1000; // 3 min between comments
-const BURST_LIMIT = 5; // max 5 in 30 min
+const MIN_GAP_MS = 3 * 60 * 1000;
+const BURST_LIMIT = 5;
 const BURST_WINDOW_MS = 30 * 60 * 1000;
 const BURST_COOLDOWN_MS = 15 * 60 * 1000;
-const MAX_TWEET_AGE_MS = 10 * 60 * 1000; // 60 min
-const SAME_AUTHOR_COOLDOWN_MS = 4 * 60 * 60 * 1000; // 4 hours
-const RANDOM_SKIP_RATE = 0.2; // skip 20% randomly
-const PRE_COMMENT_DELAY_MIN = 30; // seconds
+const MAX_TWEET_AGE_MS = 10 * 60 * 1000;
+const SAME_AUTHOR_COOLDOWN_MS = 4 * 60 * 60 * 1000;
+const RANDOM_SKIP_RATE = 0.2;
+const PRE_COMMENT_DELAY_MIN = 30;
 const PRE_COMMENT_DELAY_MAX = 90;
-const CHECK_INTERVAL_MS = 60 * 1000; // check list every 60s
+const CHECK_INTERVAL_MS = 60 * 1000;
+const PENDING_TTL_MS = 24 * 60 * 60 * 1000;
+const WORK_REMINDER_INTERVAL_MS = 2 * 24 * 60 * 60 * 1000;
 
-// ─── HELPERS ───
-function loadJSON(p, fb) { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return fb; } }
-function saveJSON(p, d) { fs.writeFileSync(p, JSON.stringify(d, null, 2)); }
-function loadText(p) { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } }
+// Weighted selection across A–E options. A=one-liner, B=question, C=experience,
+// D=wild card, E=nuance. Bias toward short formats (A, C).
+const OPTION_WEIGHTS = [0.3, 0.15, 0.3, 0.15, 0.1];
 
-function loadState() { return loadJSON(WHALE_STATE_PATH, { paused: false }); }
-function saveState(s) { saveJSON(WHALE_STATE_PATH, s); }
+// ─── CLIENTS ───
+const tg = createTelegramClient({ token: TG_TOKEN, chatId: TG_CHAT });
+const rateLimiter = makeRateLimiter({
+  maxPerHour: MAX_PER_HOUR,
+  maxPerDay: MAX_PER_DAY,
+  minGapMs: MIN_GAP_MS,
+  burstLimit: BURST_LIMIT,
+  burstWindowMs: BURST_WINDOW_MS,
+  burstCooldownMs: BURST_COOLDOWN_MS,
+  sameAuthorCooldownMs: SAME_AUTHOR_COOLDOWN_MS,
+});
+const pendingStore = makePendingStore(PENDING_PATH);
 
-function loadLogs() { return loadJSON(WHALE_LOG_PATH, { comments: [], hourly: {}, daily: {} }); }
-function saveLogs(l) { saveJSON(WHALE_LOG_PATH, l); }
+// ─── STATE ACCESSORS ───
+const loadState = () => loadJSON(WHALE_STATE_PATH, { paused: false });
+const saveState = (s) => saveJSON(WHALE_STATE_PATH, s);
+const loadLogs = () => loadJSON(WHALE_LOG_PATH, { comments: [], hourly: {}, daily: {} });
+const saveLogs = (l) => saveJSON(WHALE_LOG_PATH, l);
+const loadWhaleFeedback = () => loadJSON(WHALE_FB_PATH, { feedback: [] });
+const saveWhaleFeedback = (f) => saveJSON(WHALE_FB_PATH, f);
 
-function loadSeen() { try { return new Set(JSON.parse(fs.readFileSync(SEEN_PATH, 'utf8'))); } catch { return new Set(); } }
-function saveSeen(s) { fs.writeFileSync(SEEN_PATH, JSON.stringify([...s])); }
-
-function loadFeedback() { return loadJSON(FEEDBACK_PATH, { approvals: [], rejections: [], edits: [] }); }
-
-// ─── WHALE FEEDBACK ───
-const WHALE_FB_PATH = './data/whale-feedback.json';
-function loadWhaleFeedback() { return loadJSON(WHALE_FB_PATH, { feedback: [] }); }
-function saveWhaleFeedback(f) { saveJSON(WHALE_FB_PATH, f); }
-function addWhaleFeedback(author, tweetUrl, comment, feedbackText, deleted, kind, rewrite) {
+function addWhaleFeedback({ author, tweetUrl, comment, feedbackText = '', deleted = false, kind, rewrite }) {
   const fb = loadWhaleFeedback();
-  const entry = { date: new Date().toISOString(), author, tweetUrl, comment, feedback: feedbackText, deleted };
-  entry.kind = kind || (deleted ? 'deleted' : (feedbackText ? 'kept' : 'kept'));
+  const entry = {
+    date: new Date().toISOString(),
+    author,
+    tweetUrl,
+    comment,
+    feedback: feedbackText,
+    deleted,
+    kind: kind || (deleted ? 'deleted' : 'kept'),
+  };
   if (rewrite) entry.rewrite = rewrite;
   fb.feedback.push(entry);
   saveWhaleFeedback(fb);
 }
 
-// Pending feedback/delete actions
-const pendingActions = new Map();
-
 // ─── VOICE REFRESH ───
+let pageRef = null;
+let ctxRef = null;
+let refreshInProgress = false;
+
 async function runVoiceRefresh() {
   if (refreshInProgress) {
-    await sendTG('⏳ A voice refresh is already running. Hang tight.');
+    await tg.send('⏳ A voice refresh is already running. Hang tight.');
     return;
   }
   if (!ctxRef) {
-    await sendTG('❌ Browser context not ready yet.');
+    await tg.send('❌ Browser context not ready yet.');
     return;
   }
   refreshInProgress = true;
 
-  // load previous corpus to compute delta
-  const prevCorpus = loadJSON('./data/my-tweets-corpus.json', []);
+  const prevCorpus = loadJSON(CORPUS_PATH, []);
   const prevUrls = new Set(prevCorpus.map(t => t.url));
 
-  const handle = process.env.X_USERNAME || 'PramodReddy1606';
-  await sendTG('🔄 <b>Voice refresh starting</b>\nScraping @' + handle + '/with_replies — this takes ~5 min.');
+  await tg.send(`🔄 <b>Voice refresh starting</b>\nScraping @${ME.username}/with_replies — this takes ~5 min.`);
 
   let page = null;
   try {
     page = await ctxRef.newPage();
-
     let lastReportedScroll = 0;
     const result = await scrapeMyTweets({
       page,
-      handle,
+      handle: ME.username,
       onProgress: async ({ scrolls, kept, oldestSeen }) => {
-        // throttle Telegram updates: every 25 scrolls
         if (scrolls - lastReportedScroll >= 25) {
           lastReportedScroll = scrolls;
           const oldestStr = new Date(oldestSeen).toISOString().split('T')[0];
-          await sendTG('  scroll ' + scrolls + ' → ' + kept + ' kept · oldest=' + oldestStr);
+          await tg.send(`  scroll ${scrolls} → ${kept} kept · oldest=${oldestStr}`);
         }
       },
     });
@@ -113,335 +135,228 @@ async function runVoiceRefresh() {
     const newUrls = result.tweets.map(t => t.url);
     const added = newUrls.filter(u => !prevUrls.has(u)).length;
     const removed = [...prevUrls].filter(u => !newUrls.includes(u)).length;
-
     const build = buildVoiceSamples();
 
     let msg = '✅ <b>Voice refresh done</b>\n\n';
-    msg += '📊 Corpus: ' + result.kept + ' tweets (was ' + prevCorpus.length + ')\n';
-    msg += '➕ New since last: ' + added + '\n';
-    if (removed > 0) msg += '➖ Aged out: ' + removed + '\n';
-    msg += '📝 Voice samples: ' + build.picked + ' picked\n';
-    msg += '🛑 Stop reason: ' + result.stopReason + ' (' + result.scrolls + ' scrolls)\n';
+    msg += `📊 Corpus: ${result.kept} tweets (was ${prevCorpus.length})\n`;
+    msg += `➕ New since last: ${added}\n`;
+    if (removed > 0) msg += `➖ Aged out: ${removed}\n`;
+    msg += `📝 Voice samples: ${build.picked} picked\n`;
+    msg += `🛑 Stop reason: ${result.stopReason} (${result.scrolls} scrolls)\n`;
 
     if (added > 0) {
       const newTweets = result.tweets.filter(t => !prevUrls.has(t.url)).slice(0, 5);
       msg += '\n<b>New top entries:</b>\n';
       newTweets.forEach(t => {
-        msg += '• ' + t.text.replace(/\n/g, ' ').slice(0, 90) + '\n';
+        msg += `• ${t.text.replace(/\n/g, ' ').slice(0, 90)}\n`;
       });
     }
-    await sendTG(msg);
+    await tg.send(msg);
   } catch (e) {
-    await sendTG('❌ Refresh failed: ' + (e && e.message ? e.message : String(e)));
+    await tg.send('❌ Refresh failed: ' + (e?.message || String(e)));
   } finally {
-    if (page) { try { await page.close(); } catch (e) {} }
+    if (page) { try { await page.close(); } catch {} }
     refreshInProgress = false;
   }
 }
 
-// ─── RATE LIMITING ───
-function canComment(logs) {
-  const now = Date.now();
-  const hourKey = new Date().toISOString().substring(0, 13); // "2026-03-09T14"
-  const dayKey = new Date().toISOString().split('T')[0]; // "2026-03-09"
-  
-  const hourCount = logs.hourly[hourKey] || 0;
-  const dayCount = logs.daily[dayKey] || 0;
-  
-  if (hourCount >= MAX_PER_HOUR) return { ok: false, reason: 'Hourly limit (' + MAX_PER_HOUR + ')' };
-  if (dayCount >= MAX_PER_DAY) return { ok: false, reason: 'Daily limit (' + MAX_PER_DAY + ')' };
-  
-  // Check minimum gap
-  const recent = logs.comments.filter(c => now - new Date(c.time).getTime() < MIN_GAP_MS);
-  if (recent.length > 0) return { ok: false, reason: 'Too soon (3 min gap)' };
-  
-  // Check burst
-  const burst = logs.comments.filter(c => now - new Date(c.time).getTime() < BURST_WINDOW_MS);
-  if (burst.length >= BURST_LIMIT) {
-    const oldestBurst = new Date(burst[0].time).getTime();
-    const cooldownEnd = oldestBurst + BURST_WINDOW_MS + BURST_COOLDOWN_MS;
-    if (now < cooldownEnd) return { ok: false, reason: 'Burst cooldown (' + Math.round((cooldownEnd - now) / 60000) + ' min left)' };
-  }
-  
-  return { ok: true };
-}
+// ─── COMMAND HANDLERS ───
+async function handleCallback(update) {
+  const data = update.callback_query.data;
+  const parts = data.split('_');
+  const action = parts[0];
+  const id = parts.slice(1).join('_');
+  await tg.answerCallback(update.callback_query.id);
 
-function canCommentOnAuthor(logs, author) {
-  const now = Date.now();
-  const recent = logs.comments.find(c => 
-    c.author === author && (now - new Date(c.time).getTime()) < SAME_AUTHOR_COOLDOWN_MS
-  );
-  return !recent;
-}
+  const pending = pendingStore.get(id);
+  if (!pending) return;
 
-function recordComment(logs, author, tweetUrl, comment) {
-  const now = new Date();
-  const hourKey = now.toISOString().substring(0, 13);
-  const dayKey = now.toISOString().split('T')[0];
-  
-  logs.comments.push({ time: now.toISOString(), author, tweetUrl, comment: comment.substring(0, 100) });
-  logs.hourly[hourKey] = (logs.hourly[hourKey] || 0) + 1;
-  logs.daily[dayKey] = (logs.daily[dayKey] || 0) + 1;
-  
-  // Keep only last 200 comments in memory
-  if (logs.comments.length > 200) logs.comments = logs.comments.slice(-200);
-  
-  saveLogs(logs);
-}
-
-// ─── TELEGRAM ───
-async function sendTG(text, rm) {
-  const b = { chat_id: TG_CHAT, text, parse_mode: 'HTML' };
-  if (rm) b.reply_markup = JSON.stringify(rm);
-  const r = await fetch('https://api.telegram.org/bot' + TG_TOKEN + '/sendMessage', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b)
-  });
-  return await r.json();
-}
-
-async function answerCB(id) {
-  await fetch('https://api.telegram.org/bot' + TG_TOKEN + '/answerCallbackQuery', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ callback_query_id: id })
-  });
-}
-
-let tgOff = 0;
-let pageRef = null; // will be set in main()
-let ctxRef = null;  // will be set in main(), used to spawn fresh pages for /wrefresh
-let refreshInProgress = false;
-
-async function deleteComment(page, tweetUrl) {
-  try {
-    await page.goto(tweetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForTimeout(2000);
-    // Find our reply (from @PramodReddy1606)
-    const articles = await page.$$('article[data-testid="tweet"]');
-    for (const article of articles) {
-      const nameEl = await article.$('div[data-testid="User-Name"]');
-      if (!nameEl) continue;
-      const nameText = await nameEl.textContent();
-      if (nameText && nameText.includes((process.env.X_USERNAME || 'your_username'))) {
-        // Click the three dots on our reply
-        const moreBtn = await article.$('[data-testid="caret"]');
-        if (moreBtn) {
-          await moreBtn.click();
-          await page.waitForTimeout(1000);
-          // Click Delete
-          const menuItems = await page.$$('[role="menuitem"]');
-          for (const item of menuItems) {
-            const t = await item.textContent();
-            if (t && t.includes('Delete')) { await item.click(); break; }
-          }
-          await page.waitForTimeout(1000);
-          // Confirm delete
-          const confirmBtn = await page.$('[data-testid="confirmationSheetConfirm"]');
-          if (confirmBtn) await confirmBtn.click();
-          await page.waitForTimeout(1000);
-          return true;
-        }
-      }
+  if (action === 'wok') {
+    addWhaleFeedback({
+      author: pending.author,
+      tweetUrl: pending.tweetUrl,
+      comment: pending.comment,
+      kind: 'approved',
+    });
+    pendingStore.delete(id);
+  } else if (action === 'wfb') {
+    pendingStore.update(id, p => ({ ...p, waitingFeedback: true, deleteAfter: false }));
+    await tg.send(
+      '💬 Type your feedback for this comment.\n' +
+      '<i>Tip: start with</i> <code>&gt;&gt;</code> <i>to give the rewrite you would have posted instead.</i>'
+    );
+  } else if (action === 'wdel') {
+    pendingStore.update(id, p => ({ ...p, waitingFeedback: true, deleteAfter: true }));
+    await tg.send('🗑 Deleting comment... Type feedback (or send "." to skip):');
+    if (pageRef) {
+      const deleted = await deleteOwnComment(pageRef, pending.tweetUrl, ME.usernameLC);
+      console.log(deleted
+        ? `Deleted comment on @${pending.author}`
+        : `Failed to delete comment on @${pending.author}`);
     }
-    return false;
-  } catch(e) { console.error('Delete error:', e.message); return false; }
+  }
+}
+
+async function handleFeedbackText(txt) {
+  const fbEntry = pendingStore.findByPredicate(p => p.waitingFeedback);
+  if (!fbEntry) return false;
+
+  const [fbId, fbData] = fbEntry;
+  let kind, feedbackText = '', rewriteText = null, ack;
+
+  if (txt.startsWith('>>')) {
+    rewriteText = txt.replace(/^>>\s*/, '').trim();
+    kind = 'rewrite';
+    ack = '🔁 Rewrite saved as positive example. Learning.';
+  } else if (txt === '.') {
+    kind = fbData.deleteAfter ? 'deleted' : 'kept';
+    ack = fbData.deleteAfter ? '🗑 Comment deleted.' : '👍 Got it.';
+  } else {
+    feedbackText = txt;
+    kind = fbData.deleteAfter ? 'deleted' : 'kept';
+    ack = '📝 Feedback saved' + (fbData.deleteAfter ? ' + comment deleted' : '') + '. Learning.';
+  }
+
+  addWhaleFeedback({
+    author: fbData.author,
+    tweetUrl: fbData.tweetUrl,
+    comment: fbData.comment,
+    feedbackText,
+    deleted: fbData.deleteAfter,
+    kind,
+    rewrite: rewriteText,
+  });
+  await tg.send(ack);
+  pendingStore.delete(fbId);
+  return true;
+}
+
+async function handleCommand(txt) {
+  const cmd = txt.toLowerCase();
+
+  if (cmd === '/wstop') {
+    const state = loadState();
+    state.paused = true;
+    saveState(state);
+    await tg.send('⏸ <b>Whale bot paused.</b> Type /wstart to resume.');
+  } else if (cmd === '/wstart') {
+    const state = loadState();
+    state.paused = false;
+    saveState(state);
+    await tg.send('▶️ <b>Whale bot resumed!</b>');
+  } else if (cmd === '/wstats') {
+    const logs = loadLogs();
+    const dayKey = new Date().toISOString().split('T')[0];
+    const hourKey = new Date().toISOString().substring(0, 13);
+    const state = loadState();
+    const dayCount = logs.daily[dayKey] || 0;
+    const hourCount = logs.hourly[hourKey] || 0;
+    const total = logs.comments.length;
+
+    const authorCounts = {};
+    logs.comments.slice(-50).forEach(c => { authorCounts[c.author] = (authorCounts[c.author] || 0) + 1; });
+    const topAuthors = Object.entries(authorCounts).sort((a, b) => b[1] - a[1]).slice(0, 5);
+
+    let msg = '🐋 <b>Whale Bot Stats</b>\n\n';
+    msg += `State: ${state.paused ? '⏸ Paused' : '▶️ Running'}\n`;
+    msg += `Today: ${dayCount}/${MAX_PER_DAY} comments\n`;
+    msg += `This hour: ${hourCount}/${MAX_PER_HOUR}\n`;
+    msg += `All-time: ${total}\n\n`;
+    if (topAuthors.length > 0) {
+      msg += '<b>Most commented on:</b>\n';
+      topAuthors.forEach(([a, c]) => { msg += `@${a}: ${c}\n`; });
+    }
+    await tg.send(msg);
+  } else if (cmd === '/whelp') {
+    await tg.send(
+      '🐋 <b>Whale Bot Commands</b>\n\n' +
+      '/wstart — Resume\n/wstop — Pause\n/wstats — Stats\n' +
+      '/wfeedback — Feedback stats\n' +
+      '/wrefresh — Re-scrape your X replies & rebuild voice samples\n' +
+      '/work — View current work context\n' +
+      '/work &lt;text&gt; — Add to current work\n' +
+      '/work set &lt;text&gt; — Replace current work\n' +
+      '/whelp — This message\n\n' +
+      '<b>Feedback buttons:</b>\n' +
+      '✅ Good — logged as positive example\n' +
+      '💬 Feedback — type a critique, OR start with <code>&gt;&gt;</code> to give the rewrite you would have posted\n' +
+      '🗑 Delete — removes comment + asks for reason'
+    );
+  } else if (cmd === '/wrefresh') {
+    runVoiceRefresh().catch(e => console.error('wrefresh error:', e));
+  } else if (cmd === '/work') {
+    const currentWork = loadTextNoComments(CURRENT_WORK_PATH);
+    await tg.send(
+      '📋 <b>Current work context:</b>\n\n' + (currentWork || '(empty)') +
+      '\n\n<i>To update, send:</i>\n/work set your new focus here'
+    );
+  } else if (cmd.startsWith('/work set ')) {
+    const newWork = txt.substring('/work set '.length).trim();
+    const header =
+      '# CURRENT WORK & FOCUS\n' +
+      '# Update this every few days to keep posts and comments authentic.\n' +
+      '# The bots inject this into prompts as {CURRENT_WORK}.\n' +
+      '# You can also update via Telegram: /work <your current focus>\n\n';
+    fs.writeFileSync(CURRENT_WORK_PATH, header + newWork + '\n');
+    await tg.send(`✅ <b>Current work updated!</b>\n\n${newWork}`);
+  } else if (cmd.startsWith('/work ')) {
+    const addition = txt.substring('/work '.length).trim();
+    fs.appendFileSync(CURRENT_WORK_PATH, '\n- ' + addition + '\n');
+    await tg.send(`✅ <b>Added to current work:</b>\n- ${addition}`);
+  } else if (cmd === '/wfeedback') {
+    const wfb = loadWhaleFeedback();
+    const all = wfb.feedback.map(f => ({ ...f, kind: f.kind || (f.deleted ? 'deleted' : 'kept') }));
+    const approved = all.filter(f => f.kind === 'approved').length;
+    const rewrites = all.filter(f => f.kind === 'rewrite').length;
+    const deleted = all.filter(f => f.kind === 'deleted').length;
+    const keptNote = all.filter(f => f.kind === 'kept' && f.feedback).length;
+    let msg = '📝 <b>Whale Feedback</b>\n\n';
+    msg += `Total: ${all.length}\n✅ Approved: ${approved}\n🔁 Rewrites: ${rewrites}\n🗑 Deleted: ${deleted}\n💬 Kept w/ notes: ${keptNote}\n`;
+    if (all.length > 0) {
+      msg += '\n<b>Recent:</b>\n';
+      all.slice(-5).forEach(f => {
+        const icon = f.kind === 'approved' ? '✅' : f.kind === 'rewrite' ? '🔁' : f.kind === 'deleted' ? '🗑' : '💬';
+        const detail = f.kind === 'rewrite' ? (f.rewrite || '').substring(0, 60) : (f.feedback || '-').substring(0, 60);
+        msg += `${icon} @${f.author}: ${detail}\n`;
+      });
+    }
+    await tg.send(msg);
+  }
 }
 
 async function checkTGCommands() {
-  try {
-    const r = await fetch('https://api.telegram.org/bot' + TG_TOKEN + '/getUpdates?offset=' + tgOff + '&timeout=1');
-    const u = await r.json();
-    if (!u.ok || !u.result) return;
-    
-    for (const up of u.result) {
-      tgOff = up.update_id + 1;
-
-      // Handle callback buttons (delete, feedback)
+  const updates = await tg.pollUpdates({ timeout: 1 });
+  for (const up of updates) {
+    try {
       if (up.callback_query) {
-        const d = up.callback_query.data;
-        const parts = d.split('_');
-        const action = parts[0]; // wok, wfb, wdel
-        const id = parts.slice(1).join('_');
-        await answerCB(up.callback_query.id);
-
-        const pending = pendingActions.get(id);
-        if (!pending) continue;
-
-        if (action === 'wok') {
-          addWhaleFeedback(pending.author, pending.tweetUrl, pending.comment, '', false, 'approved');
-          pendingActions.delete(id);
-        }
-        else if (action === 'wfb') {
-          // Wants to give feedback (keep comment). Prefix with ">>" to record a rewrite.
-          pending.waitingFeedback = true;
-          pending.deleteAfter = false;
-          await sendTG('💬 Type your feedback for this comment.\n<i>Tip: start with</i> <code>&gt;&gt;</code> <i>to give the rewrite you would have posted instead.</i>');
-        }
-        else if (action === 'wdel') {
-          // Delete + ask for feedback
-          pending.waitingFeedback = true;
-          pending.deleteAfter = true;
-          await sendTG('🗑 Deleting comment... Type feedback (or send "." to skip):');
-          // Delete the comment now
-          if (pageRef) {
-            const deleted = await deleteComment(pageRef, pending.tweetUrl);
-            if (deleted) console.log('Deleted comment on @' + pending.author);
-            else console.log('Failed to delete comment on @' + pending.author);
-          }
-        }
+        await handleCallback(up);
         continue;
       }
-
-      // Handle text messages
-      if (up.message && up.message.text) {
+      if (up.message?.text) {
         const txt = up.message.text.trim();
-
-        // Check if someone is giving feedback
-        const fbEntry = [...pendingActions.entries()].find(([k, p]) => p.waitingFeedback);
-        if (fbEntry && !txt.startsWith('/')) {
-          const [fbId, fbData] = fbEntry;
-          let kind, feedbackText = '', rewriteText = null, ack;
-          if (txt.startsWith('>>')) {
-            rewriteText = txt.replace(/^>>\s*/, '').trim();
-            kind = 'rewrite';
-            ack = '🔁 Rewrite saved as positive example. Learning.';
-          } else if (txt === '.') {
-            kind = fbData.deleteAfter ? 'deleted' : 'kept';
-            ack = fbData.deleteAfter ? '🗑 Comment deleted.' : '👍 Got it.';
-          } else {
-            feedbackText = txt;
-            kind = fbData.deleteAfter ? 'deleted' : 'kept';
-            ack = '📝 Feedback saved' + (fbData.deleteAfter ? ' + comment deleted' : '') + '. Learning.';
-          }
-          addWhaleFeedback(fbData.author, fbData.tweetUrl, fbData.comment, feedbackText, fbData.deleteAfter, kind, rewriteText);
-          await sendTG(ack);
-          pendingActions.delete(fbId);
-          continue;
-        }
-
-        // Handle commands
-        const cmd = txt.toLowerCase();
-      
-        if (cmd === '/wstop') {
-        const state = loadState();
-        state.paused = true;
-        saveState(state);
-        await sendTG('⏸ <b>Whale bot paused.</b> Type /wstart to resume.');
-      }
-      else if (txt === '/wstart') {
-        const state = loadState();
-        state.paused = false;
-        saveState(state);
-        await sendTG('▶️ <b>Whale bot resumed!</b>');
-      }
-      else if (txt === '/wstats') {
-        const logs = loadLogs();
-        const dayKey = new Date().toISOString().split('T')[0];
-        const hourKey = new Date().toISOString().substring(0, 13);
-        const state = loadState();
-        const dayCount = logs.daily[dayKey] || 0;
-        const hourCount = logs.hourly[hourKey] || 0;
-        const total = logs.comments.length;
-        
-        // Top authors
-        const authorCounts = {};
-        logs.comments.slice(-50).forEach(c => { authorCounts[c.author] = (authorCounts[c.author] || 0) + 1; });
-        const topAuthors = Object.entries(authorCounts).sort((a, b) => b[1] - a[1]).slice(0, 5);
-        
-        let msg = '🐋 <b>Whale Bot Stats</b>\n\n';
-        msg += 'State: ' + (state.paused ? '⏸ Paused' : '▶️ Running') + '\n';
-        msg += 'Today: ' + dayCount + '/' + MAX_PER_DAY + ' comments\n';
-        msg += 'This hour: ' + hourCount + '/' + MAX_PER_HOUR + '\n';
-        msg += 'All-time: ' + total + '\n\n';
-        if (topAuthors.length > 0) {
-          msg += '<b>Most commented on:</b>\n';
-          topAuthors.forEach(([a, c]) => { msg += '@' + a + ': ' + c + '\n'; });
-        }
-        await sendTG(msg);
-      }
-      else if (cmd === '/whelp') {
-        await sendTG('🐋 <b>Whale Bot Commands</b>\n\n/wstart — Resume\n/wstop — Pause\n/wstats — Stats\n/wfeedback — Feedback stats\n/wrefresh — Re-scrape your X replies & rebuild voice samples\n/work — View current work context\n/work &lt;text&gt; — Add to current work\n/work set &lt;text&gt; — Replace current work\n/whelp — This message\n\n<b>Feedback buttons:</b>\n✅ Good — logged as positive example\n💬 Feedback — type a critique, OR start with <code>&gt;&gt;</code> to give the rewrite you would have posted\n🗑 Delete — removes comment + asks for reason');
-      }
-      else if (cmd === '/wrefresh') {
-        // run async so the polling loop isn't blocked
-        runVoiceRefresh().catch(e => console.error('wrefresh error:', e));
-      }
-      else if (cmd === '/work') {
-        const currentWork = loadText('./prompts/current-work.txt').replace(/^#.*$/gm, '').trim();
-        await sendTG('📋 <b>Current work context:</b>\n\n' + (currentWork || '(empty)') + '\n\n<i>To update, send:</i>\n/work set your new focus here');
-      }
-      else if (cmd.startsWith('/work set ') || cmd.startsWith('/work ')) {
-        const newWork = txt.substring(txt.indexOf(' ', 6) !== -1 ? txt.indexOf(' ', 6) + 1 : 6).trim();
-        if (txt.toLowerCase().startsWith('/work set ')) {
-          // Full replace
-          const header = '# PRAMOD\'S CURRENT WORK & FOCUS\n# Update this every few days to keep posts and comments authentic.\n# The bots inject this into prompts as {CURRENT_WORK}.\n# You can also update via Telegram: /work <your current focus>\n\n';
-          fs.writeFileSync('./prompts/current-work.txt', header + newWork + '\n');
-          await sendTG('✅ <b>Current work updated!</b>\n\n' + newWork);
+        if (!txt.startsWith('/')) {
+          if (await handleFeedbackText(txt)) continue;
         } else {
-          // Append
-          fs.appendFileSync('./prompts/current-work.txt', '\n- ' + txt.substring(6).trim() + '\n');
-          await sendTG('✅ <b>Added to current work:</b>\n- ' + txt.substring(6).trim());
+          await handleCommand(txt);
         }
       }
-      else if (cmd === '/wfeedback') {
-        const wfb = loadWhaleFeedback();
-        const all = wfb.feedback.map(f => ({ ...f, kind: f.kind || (f.deleted ? 'deleted' : 'kept') }));
-        const approved = all.filter(f => f.kind === 'approved').length;
-        const rewrites = all.filter(f => f.kind === 'rewrite').length;
-        const deleted = all.filter(f => f.kind === 'deleted').length;
-        const keptNote = all.filter(f => f.kind === 'kept' && f.feedback).length;
-        let msg = '📝 <b>Whale Feedback</b>\n\nTotal: ' + all.length + '\n✅ Approved: ' + approved + '\n🔁 Rewrites: ' + rewrites + '\n🗑 Deleted: ' + deleted + '\n💬 Kept w/ notes: ' + keptNote + '\n';
-        if (all.length > 0) {
-          msg += '\n<b>Recent:</b>\n';
-          all.slice(-5).forEach(f => {
-            const icon = f.kind === 'approved' ? '✅' : f.kind === 'rewrite' ? '🔁' : f.kind === 'deleted' ? '🗑' : '💬';
-            const detail = f.kind === 'rewrite' ? (f.rewrite || '').substring(0, 60) : (f.feedback || '-').substring(0, 60);
-            msg += icon + ' @' + f.author + ': ' + detail + '\n';
-          });
-        }
-        await sendTG(msg);
-      }
-      }
+    } catch (e) {
+      console.error('TG handler error:', e.message);
     }
-  } catch(e) {}
+  }
 }
 
 // ─── CLAUDE COMMENT GENERATION ───
 async function generateComment(tweetText, tweetAuthor, gp, listStrategy) {
-  const fb = loadFeedback();
-  const wfb = loadWhaleFeedback();
-  let fbCtx = '';
-  const ra = fb.approvals.slice(-10);
-  if (ra.length > 0) {
-    fbCtx += 'COMMENTS PRAMOD LIKED:\n';
-    ra.forEach(a => { fbCtx += '- "' + a.commentText + '"\n'; });
-  }
-  const re = fb.edits.slice(-5);
-  if (re.length > 0) {
-    fbCtx += 'PRAMOD REWRITES:\n';
-    re.forEach(e => { fbCtx += '- "' + e.editedComment + '"\n'; });
-  }
-  // Whale-specific feedback. Kinds: approved (Good tap), kept (kept with critique),
-  // deleted (deleted with reason), rewrite (Pramod said what he would have posted instead).
-  const wfbAll = wfb.feedback.map(f => ({ ...f, kind: f.kind || (f.deleted ? 'deleted' : 'kept') }));
-  const approvals = wfbAll.filter(f => f.kind === 'approved').slice(-8);
-  const rewrites = wfbAll.filter(f => f.kind === 'rewrite').slice(-6);
-  const corrections = wfbAll.filter(f => (f.kind === 'kept' || f.kind === 'deleted') && f.feedback).slice(-8);
-  if (approvals.length || rewrites.length || corrections.length) {
-    fbCtx += '\nWHALE COMMENT FEEDBACK FROM PRAMOD:\n';
-    approvals.forEach(f => {
-      fbCtx += '- APPROVED on @' + f.author + ': "' + f.comment.substring(0, 120) + '"\n';
-    });
-    rewrites.forEach(f => {
-      fbCtx += '- REWRITE on @' + f.author + ': bot said "' + f.comment.substring(0, 80) + '" → Pramod would say: "' + (f.rewrite || '').substring(0, 160) + '"\n';
-    });
-    corrections.forEach(f => {
-      fbCtx += '- ' + (f.kind === 'deleted' ? 'DELETED' : 'KEPT-WITH-NOTE') + ' on @' + f.author + ': "' + f.comment.substring(0, 60) + '" → "' + f.feedback + '"\n';
-    });
-  }
-  
-  const currentWork = loadText('./prompts/current-work.txt').replace(/^#.*$/gm, '').trim();
-  const voiceSamples = loadText('./prompts/voice-samples.txt').replace(/^#.*$/gm, '').trim();
+  const fbCtx = buildFeedbackContext({
+    feedbackPath: FEEDBACK_PATH,
+    whaleFeedbackPath: WHALE_FB_PATH,
+  });
+  const currentWork = loadTextNoComments(CURRENT_WORK_PATH);
+  const voiceSamples = loadTextNoComments(VOICE_SAMPLES_PATH);
+
   const prompt = gp
-    .replace('{FEEDBACK_CONTEXT}', fbCtx || 'No feedback yet.')
+    .replace('{FEEDBACK_CONTEXT}', fbCtx)
     .replace('{VIRAL_PATTERNS}', 'Focus on being early and sharp.')
     .replace('{LIST_STRATEGY}', listStrategy)
     .replace('{AUTHOR}', tweetAuthor)
@@ -449,129 +364,57 @@ async function generateComment(tweetText, tweetAuthor, gp, listStrategy) {
     .replace('{CURRENT_WORK}', currentWork || 'No current work context available.')
     .replace('{VOICE_SAMPLES}', voiceSamples || 'No voice samples available yet.');
 
-  try {
-    let d = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const r = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01' },
-        body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 400, messages: [{ role: 'user', content: prompt }] })
-      });
-      d = await r.json();
-      if (d.content && d.content[0]) break;
-      if (d.error && d.error.type === 'overloaded_error') {
-        const wait = (attempt + 1) * 10;
-        console.log('API overloaded, retrying in ' + wait + 's (attempt ' + (attempt+1) + '/3)');
-        await new Promise(resolve => setTimeout(resolve, wait * 1000));
-      } else {
-        console.error('Claude API error:', JSON.stringify(d));
-        return null;
-      }
-    }
-    if (d && d.content && d.content[0]) {
-      const text = d.content[0].text.trim();
+  const text = await callClaude({ apiKey: API_KEY, prompt, maxTokens: 400 });
+  if (!text) return null;
+  if (text.trim() === 'SKIP' || text.trim().startsWith('SKIP')) {
+    console.log('Claude said SKIP — skipping this tweet');
+    return null;
+  }
 
-      // Handle SKIP response
-      if (text === 'SKIP' || text.startsWith('SKIP')) {
-        console.log('Claude said SKIP — skipping this tweet');
-        return null;
-      }
+  const opts = parseLetterOptions(text, 'E');
+  const valid = opts.filter(o =>
+    o !== 'SKIP' &&
+    !o.startsWith('SKIP') &&
+    !o.toLowerCase().includes('i need to see') &&
+    !o.toLowerCase().includes('please provide') &&
+    !o.toLowerCase().includes('voice prompt')
+  );
 
-      const lines = text.split('\n').filter(l => l.trim());
-      // Pick one randomly from options A-E
-      const opts = [];
-      let cur = '';
-      for (const line of lines) {
-        if (line.match(/^[A-E]:/)) {
-          if (cur) opts.push(cur.trim());
-          cur = line.replace(/^[A-E]:\s*/, '').replace(/^["']|["']$/g, '');
-        } else if (cur) { cur += ' ' + line.trim(); }
-      }
-      if (cur) opts.push(cur.trim());
-
-      // Filter out SKIP options and obviously broken responses
-      const valid = opts.filter(o => o !== 'SKIP' && !o.startsWith('SKIP') && !o.toLowerCase().includes('i need to see') && !o.toLowerCase().includes('please provide') && !o.toLowerCase().includes('voice prompt'));
-
-      if (valid.length > 0) {
-        // Pick randomly but weight toward A (one-liner) and C (experience) for speed
-        const weights = [0.3, 0.15, 0.3, 0.15, 0.1];
-        let rand = Math.random();
-        let pick = 0;
-        for (let i = 0; i < weights.length && i < valid.length; i++) {
-          rand -= weights[i];
-          if (rand <= 0) { pick = i; break; }
-        }
-        return valid[Math.min(pick, valid.length - 1)];
-      }
-      // All options were SKIP or invalid
-      console.log('All options were SKIP or invalid');
-      return null;
-    }
-  } catch(e) { console.error('Claude error:', e.message); }
-  return null;
+  if (valid.length === 0) {
+    console.log('All options were SKIP or invalid');
+    return null;
+  }
+  return weightedPick(valid, OPTION_WEIGHTS);
 }
 
-// ─── SCRAPE LIST ───
-async function scrapeList(page, listUrl) {
-  await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await page.waitForTimeout(3000);
-  await page.evaluate(() => window.scrollBy(0, 500));
-  await page.waitForTimeout(2000);
-  
-  return await page.evaluate(() => {
-    const els = document.querySelectorAll('article[data-testid="tweet"]');
-    const res = [];
-    els.forEach(el => {
-      try {
-        const sc = el.querySelector('[data-testid="socialContext"]');
-        if (sc && sc.textContent.includes('reposted')) return;
-        // Skip quote tweets - they contain embedded tweets
-        const ia = el.querySelectorAll('article');
-        if (ia.length > 1) return;
-        // Skip if contains a quoted tweet card
-        const qt = el.querySelector('[data-testid="quoteTweet"], [role="link"][tabindex="0"] article, div[data-testid="card.wrapper"]');
-        if (qt) return;
-        // Skip if the tweet has a "Quote" label or embedded tweet block
-        const allDivs = el.querySelectorAll('div[role="link"]');
-        for (const d of allDivs) {
-          if (d.querySelector('time') && d !== el.closest('div[role="link"]')) return;
-        }
-        const ae = el.querySelector('div[data-testid="User-Name"] a');
-        const author = ae ? ae.getAttribute('href').replace('/', '') : 'unknown';
-        const te = el.querySelector('div[data-testid="tweetText"]');
-        const text = te ? te.innerText : '';
-        const ti = el.querySelector('time');
-        const time = ti ? ti.getAttribute('datetime') : null;
-        let url = '';
-        el.querySelectorAll('a[href*="/status/"]').forEach(l => {
-          const h = l.getAttribute('href');
-          if (h && h.match(/\/status\/\d+$/)) url = 'https://x.com' + h;
-        });
-        if (text && url) res.push({ author, text, time, tweetUrl: url });
-      } catch(e) {}
-    });
-    return res;
-  });
-}
+async function generateReply(ourComment, theirReply, theirUsername, originalAuthor) {
+  const prompt = `You are ${ME.displayName} (${ME.handle}). You commented on @${originalAuthor}'s tweet. Now @${theirUsername} replied to your comment. Continue the conversation naturally.
 
-// ─── POST COMMENT ───
-async function postComment(page, tweetUrl, commentText) {
-  await page.goto(tweetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await page.waitForTimeout(2000 + Math.random() * 2000);
-  const rb = await page.waitForSelector('div[data-testid="tweetTextarea_0"]', { timeout: 10000 });
-  await rb.click();
-  await page.waitForTimeout(300 + Math.random() * 500);
-  await page.keyboard.type(commentText, { delay: 30 + Math.random() * 50 });
-  await page.waitForTimeout(800 + Math.random() * 1000);
-  const btn = await page.waitForSelector('button[data-testid="tweetButtonInline"]', { timeout: 5000 });
-  await btn.click();
-  await page.waitForTimeout(2000 + Math.random() * 2000);
-  return true;
+YOUR ORIGINAL COMMENT: "${ourComment}"
+
+THEIR REPLY: "${theirReply}"
+
+RULES:
+- Keep it short, 1-2 lines
+- Be conversational and natural
+- Don't repeat what you already said
+- If they asked a question, answer it genuinely
+- If they agreed, add something new to the conversation
+- If they disagreed, be respectful and curious
+- Sound like a normal person texting
+- NEVER promote your business or products
+- Vary your formatting (sometimes capitalize, sometimes don't, sometimes use periods, sometimes don't)
+
+Write exactly 1 reply. Just the text, nothing else.`;
+
+  const text = await callClaude({ apiKey: API_KEY, prompt, maxTokens: 150 });
+  if (!text) return null;
+  return text.trim().replace(/^["']|["']$/g, '');
 }
 
 // ─── REPLY WATCHLIST ───
-function loadWatchlist() { return loadJSON(WATCH_PATH, []); }
-function saveWatchlist(w) { saveJSON(WATCH_PATH, w); }
+const loadWatchlist = () => loadJSON(WATCH_PATH, []);
+const saveWatchlist = (w) => saveJSON(WATCH_PATH, w);
 
 function addToWatchlist(tweetUrl, author, ourComment) {
   const wl = loadWatchlist();
@@ -589,33 +432,31 @@ function cleanWatchlist() {
 async function checkForReplies(page) {
   const wl = cleanWatchlist();
   if (wl.length === 0) return;
-  
-  console.log('Checking ' + wl.length + ' watched comments for replies...');
-  
+
+  console.log(`Checking ${wl.length} watched comments for replies...`);
+
   for (const watch of wl) {
     if (watch.repliedTo.length >= MAX_REPLIES_PER_THREAD) continue;
-    
+
     try {
       await page.goto(watch.tweetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await page.waitForTimeout(2500);
-      
-      // Find our comment in the replies
-      const replies = await page.evaluate((ourUsername) => {
+
+      const replies = await page.evaluate((me) => {
         const articles = document.querySelectorAll('article[data-testid="tweet"]');
         let foundOurs = false;
         const repliesToUs = [];
-        
+
         for (const article of articles) {
           const nameEl = article.querySelector('div[data-testid="User-Name"]');
           if (!nameEl) continue;
           const nameText = nameEl.textContent || '';
-          
-          if (nameText.includes(ourUsername)) {
+
+          if (nameText.toLowerCase().includes(me)) {
             foundOurs = true;
             continue;
           }
-          
-          // If we found our comment, the next replies might be to us
+
           if (foundOurs) {
             const textEl = article.querySelector('div[data-testid="tweetText"]');
             const replyText = textEl ? textEl.innerText : '';
@@ -626,131 +467,147 @@ async function checkForReplies(page) {
               const h = l.getAttribute('href');
               if (h && h.match(/\/status\/\d+$/)) replyUrl = 'https://x.com' + h;
             });
-            
-            if (replyText && replyAuthor && replyAuthor !== ourUsername) {
+            if (replyText && replyAuthor && replyAuthor.toLowerCase() !== me) {
               repliesToUs.push({ author: replyAuthor, text: replyText.substring(0, 300), url: replyUrl });
             }
-            // Only check the immediate next reply
             break;
           }
         }
         return repliesToUs;
-      }, (process.env.X_USERNAME || 'your_username'));
-      
+      }, ME.usernameLC);
+
       if (replies.length === 0) continue;
-      
+
       for (const reply of replies) {
-        // Skip if we already replied to this person in this thread
         if (watch.repliedTo.includes(reply.author)) continue;
-        
-        console.log('Reply from @' + reply.author + ' on @' + watch.author + ' thread');
-        
-        // Generate a reply
+        console.log(`Reply from @${reply.author} on @${watch.author} thread`);
+
         const replyComment = await generateReply(watch.ourComment, reply.text, reply.author, watch.author);
         if (!replyComment) continue;
-        
-        // Delay before replying
+
         const delay = (REPLY_DELAY_MIN + Math.random() * (REPLY_DELAY_MAX - REPLY_DELAY_MIN)) * 1000;
-        console.log('Replying in ' + Math.round(delay / 1000) + 's...');
+        console.log(`Replying in ${Math.round(delay / 1000)}s...`);
         await page.waitForTimeout(delay);
-        
-        // Post the reply
+
         try {
-          if (reply.url) {
-            await postComment(page, reply.url, replyComment);
-          } else {
-            await postComment(page, watch.tweetUrl, replyComment);
-          }
-          
-          // Mark as replied
+          await postComment(page, reply.url || watch.tweetUrl, replyComment);
           watch.repliedTo.push(reply.author);
           saveWatchlist(wl);
-          
-          console.log('✅ Replied to @' + reply.author);
-          await sendTG(
-            '🔄 <b>Auto-replied to @' + reply.author + '</b>\n' +
-            '(thread with @' + watch.author + ')\n\n' +
-            '💬 They said: "' + reply.text.substring(0, 100) + '"\n\n' +
-            '↩️ Our reply: ' + replyComment + '\n\n' +
-            '🔗 ' + watch.tweetUrl
+          console.log(`✅ Replied to @${reply.author}`);
+          await tg.send(
+            `🔄 <b>Auto-replied to @${reply.author}</b>\n` +
+            `(thread with @${watch.author})\n\n` +
+            `💬 They said: "${reply.text.substring(0, 100)}"\n\n` +
+            `↩️ Our reply: ${replyComment}\n\n` +
+            `🔗 ${watch.tweetUrl}`
           );
-        } catch(e) {
-          console.log('Failed to reply: ' + e.message.substring(0, 80));
+        } catch (e) {
+          console.log(`Failed to reply: ${e.message.substring(0, 80)}`);
         }
       }
-      
+
       await page.waitForTimeout(1000);
-    } catch(e) {
-      console.log('Watch check error: ' + e.message.substring(0, 80));
+    } catch (e) {
+      console.log(`Watch check error: ${e.message.substring(0, 80)}`);
     }
   }
 }
 
-async function generateReply(ourComment, theirReply, theirUsername, originalAuthor) {
-  const prompt = `You are Pramod (@PramodReddy1606). You commented on @${originalAuthor}'s tweet. Now @${theirUsername} replied to your comment. Continue the conversation naturally.
+// ─── MAIN LOOP HELPERS ───
+async function processTweet(page, tw, list, gp) {
+  const freshLogs = loadLogs();
+  const check = rateLimiter.canComment(freshLogs);
+  if (!check.ok) {
+    console.log(`Rate limit: ${check.reason}`);
+    return { rateLimited: true };
+  }
 
-YOUR ORIGINAL COMMENT: "${ourComment}"
+  if (!rateLimiter.canCommentOnAuthor(freshLogs, tw.author)) {
+    console.log(`Skipping @${tw.author} (commented recently)`);
+    return { skipped: true };
+  }
 
-THEIR REPLY: "${theirReply}"
+  if (Math.random() < RANDOM_SKIP_RATE) {
+    console.log(`Random skip @${tw.author}`);
+    return { skipped: true };
+  }
 
-RULES:
-- Keep it short, 1-2 lines
-- Be conversational and natural
-- Don't repeat what you already said
-- If they asked a question, answer it genuinely
-- If they agreed, add something new to the conversation
-- If they disagreed, be respectful and curious
-- Sound like a normal person texting
-- NEVER mention Nalikes, your business, or any numbers
-- Vary your formatting (sometimes capitalize, sometimes don't, sometimes use periods, sometimes don't)
+  console.log(`New tweet from @${tw.author} [${list.name}]`);
 
-Write exactly 1 reply. Just the text, nothing else.`;
+  const comment = await generateComment(tw.text, tw.author, gp, list.strategy);
+  if (!comment) {
+    console.log('Failed to generate comment');
+    return { skipped: false, generated: false };
+  }
+
+  const delay = (PRE_COMMENT_DELAY_MIN + Math.random() * (PRE_COMMENT_DELAY_MAX - PRE_COMMENT_DELAY_MIN)) * 1000;
+  console.log(`Waiting ${Math.round(delay / 1000)}s before posting...`);
+  await page.waitForTimeout(delay);
 
   try {
-    let d = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const r = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01' },
-        body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 150, messages: [{ role: 'user', content: prompt }] })
-      });
-      d = await r.json();
-      if (d.content && d.content[0]) return d.content[0].text.trim().replace(/^["']|["']$/g, '');
-      if (d.error && d.error.type === 'overloaded_error') {
-        const wait = (attempt + 1) * 10;
-        console.log('Reply API overloaded, retrying in ' + wait + 's (attempt ' + (attempt+1) + '/3)');
-        await new Promise(resolve => setTimeout(resolve, wait * 1000));
-      } else {
-        console.error('Reply API error:', JSON.stringify(d));
-        break;
+    await postComment(page, tw.tweetUrl, comment);
+    rateLimiter.recordComment(freshLogs, tw.author, tw.tweetUrl, comment);
+    saveLogs(freshLogs);
+
+    console.log(`✅ Posted on @${tw.author} [${list.name}]`);
+    addToWatchlist(tw.tweetUrl, tw.author, comment);
+
+    const commentId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    pendingStore.set(commentId, {
+      author: tw.author,
+      tweetUrl: tw.tweetUrl,
+      comment,
+      listName: list.name,
+      waitingFeedback: false,
+      deleteAfter: false,
+    });
+
+    await tg.send(
+      `🐋 <b>Auto-commented on @${tw.author}</b> · <i>${list.name}</i>\n\n` +
+      `💬 ${comment}\n\n` +
+      `🔗 ${tw.tweetUrl}`,
+      {
+        inline_keyboard: [[
+          { text: '✅ Good', callback_data: `wok_${commentId}` },
+          { text: '💬 Feedback', callback_data: `wfb_${commentId}` },
+          { text: '🗑 Delete', callback_data: `wdel_${commentId}` },
+        ]],
       }
-    }
-  } catch(e) { console.error('Reply gen error:', e.message); }
-  return null;
+    );
+    return { posted: true };
+  } catch (e) {
+    console.log(`Failed to post: ${e.message}`);
+    await tg.send(`⚠️ Failed to comment on @${tw.author}: ${e.message.substring(0, 80)}`);
+    return { posted: false, error: e.message };
+  }
 }
 
 // ─── MAIN ───
 async function main() {
   console.log('🐋 Whale Auto-Commenter starting...');
-  if (!TG_TOKEN || !TG_CHAT || !API_KEY) { console.error('Missing env'); process.exit(1); }
 
   const gp = loadText(PROMPT_PATH);
-  if (!gp) { console.error('No prompt file'); process.exit(1); }
+  if (!gp) {
+    console.error(`No prompt file at ${PROMPT_PATH}`);
+    process.exit(1);
+  }
 
-  const seen = loadSeen();
+  const seen = loadSet(SEEN_PATH);
   const state = loadState();
 
-  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu'] });
-  const ctx = await browser.newContext({ storageState: SESSION_PATH, viewport: { width: 1280, height: 720 }, userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' });
-  const page = await ctx.newPage();
-
-  console.log('Verifying login...');
-  await page.goto('https://x.com/home', { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await page.waitForTimeout(3000);
-  if ((await page.url()).includes('/login')) { await sendTG('❌ X session expired.'); process.exit(1); }
-  console.log('Logged in!');
+  const { browser, ctx, page } = await launchBrowser({ sessionPath: SESSION_PATH });
   pageRef = page;
   ctxRef = ctx;
+
+  console.log('Verifying login...');
+  if (!(await verifyLogin(page))) {
+    await tg.send('❌ X session expired.');
+    await browser.close();
+    process.exit(1);
+  }
+  console.log('Logged in!');
+
+  pendingStore.gc(PENDING_TTL_MS);
 
   const logs = loadLogs();
   const dayKey = new Date().toISOString().split('T')[0];
@@ -759,16 +616,16 @@ async function main() {
   const config = loadJSON(CONFIG_PATH, { lists: [] });
   const lists = config.lists || [];
 
-  await sendTG(
+  await tg.send(
     '🐋 <b>Whale Auto-Commenter online!</b>\n\n' +
-    '• Monitoring: ' + lists.length + ' lists (' + lists.map(l => l.name).join(', ') + ')\n' +
-    '• Limits: ' + MAX_PER_HOUR + '/hr, ' + MAX_PER_DAY + '/day\n' +
-    '• Today so far: ' + dayCount + ' comments\n' +
-    '• State: ' + (state.paused ? 'PAUSED' : 'RUNNING') + '\n\n' +
+    `• Identity: @${ME.username}\n` +
+    `• Monitoring: ${lists.length} lists (${lists.map(l => l.name).join(', ')})\n` +
+    `• Limits: ${MAX_PER_HOUR}/hr, ${MAX_PER_DAY}/day\n` +
+    `• Today so far: ${dayCount} comments\n` +
+    `• State: ${state.paused ? 'PAUSED' : 'RUNNING'}\n\n` +
     '/wstop /wstart /wstats /whelp'
   );
 
-  // Main loop
   while (true) {
     try {
       await checkTGCommands();
@@ -776,109 +633,61 @@ async function main() {
 
       if (!currentState.paused) {
         const currentLogs = loadLogs();
-        const rateCheck = canComment(currentLogs);
-        
+        const rateCheck = rateLimiter.canComment(currentLogs);
+
         if (rateCheck.ok) {
-          const config = loadJSON(CONFIG_PATH, { lists: [] });
-          const lists = config.lists || [];
-
-          for (const list of lists) {
+          const freshConfig = loadJSON(CONFIG_PATH, { lists: [] });
+          for (const list of freshConfig.lists || []) {
             const tweets = await scrapeList(page, list.url);
-            console.log('Found ' + tweets.length + ' in "' + list.name + '"');
+            console.log(`Found ${tweets.length} in "${list.name}"`);
 
+            let postedThisList = false;
             for (const tw of tweets) {
               if (seen.has(tw.tweetUrl)) continue;
 
-              // Only original tweets, not too old
               if (tw.time) {
                 const age = Date.now() - new Date(tw.time).getTime();
                 if (age > MAX_TWEET_AGE_MS) { seen.add(tw.tweetUrl); continue; }
               }
 
-              // Skip own tweets
-              if (tw.author.toLowerCase() === (process.env.X_USERNAME || 'your_username')) { seen.add(tw.tweetUrl); continue; }
-
-              // Check rate limits again
-              const freshLogs = loadLogs();
-              const check = canComment(freshLogs);
-              if (!check.ok) { console.log('Rate limit: ' + check.reason); break; }
-
-              // Check same author cooldown
-              if (!canCommentOnAuthor(freshLogs, tw.author)) {
-                console.log('Skipping @' + tw.author + ' (commented recently)');
+              if (tw.author.toLowerCase() === ME.usernameLC) {
                 seen.add(tw.tweetUrl);
                 continue;
               }
 
-              // Random skip 20%
-              if (Math.random() < RANDOM_SKIP_RATE) {
-                console.log('Random skip @' + tw.author);
-                seen.add(tw.tweetUrl);
-                continue;
-              }
+              const result = await processTweet(page, tw, list, gp);
+              if (result.rateLimited) break;
 
-              console.log('New tweet from @' + tw.author + ' [' + list.name + ']');
-
-              // Generate comment with list-specific strategy
-              const comment = await generateComment(tw.text, tw.author, gp, list.strategy);
-              if (!comment) { console.log('Failed to generate comment'); continue; }
-
-              // Human-like delay before posting
-              const delay = (PRE_COMMENT_DELAY_MIN + Math.random() * (PRE_COMMENT_DELAY_MAX - PRE_COMMENT_DELAY_MIN)) * 1000;
-              console.log('Waiting ' + Math.round(delay / 1000) + 's before posting...');
-              await page.waitForTimeout(delay);
-
-              // Post comment
-              try {
-                await postComment(page, tw.tweetUrl, comment);
-                recordComment(freshLogs, tw.author, tw.tweetUrl, comment);
-                seen.add(tw.tweetUrl);
-                saveSeen(seen);
-
-                console.log('✅ Posted on @' + tw.author + ' [' + list.name + ']');
-                addToWatchlist(tw.tweetUrl, tw.author, comment);
-                const commentId = Date.now().toString();
-                pendingActions.set(commentId, { author: tw.author, tweetUrl: tw.tweetUrl, comment, listName: list.name, waitingFeedback: false, deleteAfter: false });
-                await sendTG(
-                  '🐋 <b>Auto-commented on @' + tw.author + '</b> · <i>' + list.name + '</i>\n\n' +
-                  '💬 ' + comment + '\n\n' +
-                  '🔗 ' + tw.tweetUrl,
-                  { inline_keyboard: [
-                    [{ text: '✅ Good', callback_data: 'wok_' + commentId }, { text: '💬 Feedback', callback_data: 'wfb_' + commentId }, { text: '🗑 Delete', callback_data: 'wdel_' + commentId }]
-                  ]}
-              );
-            } catch(e) {
-              console.log('Failed to post: ' + e.message);
-              await sendTG('⚠️ Failed to comment on @' + tw.author + ': ' + e.message.substring(0, 80));
               seen.add(tw.tweetUrl);
-              saveSeen(seen);
+              saveSet(SEEN_PATH, seen);
+
+              if (result.posted) {
+                postedThisList = true;
+                break;
+              }
             }
-            
-              // Only one comment per check cycle
-              break;
-            }
+            if (postedThisList) break;
           }
         } else {
-          console.log('Rate limited: ' + rateCheck.reason);
+          console.log(`Rate limited: ${rateCheck.reason}`);
+        }
+
+        try {
+          await checkForReplies(page);
+        } catch (e) {
+          console.log(`Reply check error: ${e.message.substring(0, 50)}`);
         }
       } else {
         console.log('Paused.');
       }
 
-      // Check for replies to our comments every cycle
-      if (!currentState.paused) {
-        try { await checkForReplies(page); } catch(e) { console.log('Reply check error: ' + e.message.substring(0, 50)); }
-      }
-
-      // 2-day reminder to update current work context
-      const WORK_REMINDER_INTERVAL = 2 * 24 * 60 * 60 * 1000; // 2 days
       const wState = loadState();
       const lastReminder = wState.lastWorkReminder || 0;
-      if (Date.now() - lastReminder > WORK_REMINDER_INTERVAL) {
-        const currentWork = loadText('./prompts/current-work.txt').replace(/^#.*$/gm, '').trim();
-        await sendTG(
+      if (Date.now() - lastReminder > WORK_REMINDER_INTERVAL_MS) {
+        const currentWork = loadTextNoComments(CURRENT_WORK_PATH);
+        await tg.send(
           '🔄 <b>Time to update your current work context!</b>\n\n' +
-          '<b>Current:</b>\n' + (currentWork || '(empty)') + '\n\n' +
+          `<b>Current:</b>\n${currentWork || '(empty)'}\n\n` +
           'Still accurate? If not, send:\n' +
           '/work set &lt;your updated focus&gt;\n' +
           'Or add with: /work &lt;new thing&gt;'
@@ -887,12 +696,12 @@ async function main() {
         saveState(wState);
       }
 
-      // Wait before next check
+      pendingStore.gc(PENDING_TTL_MS);
+
       await page.waitForTimeout(CHECK_INTERVAL_MS);
-      
-    } catch(e) {
+    } catch (e) {
       console.error('Error:', e.message);
-      await sendTG('⚠️ Whale bot error: ' + e.message.substring(0, 100));
+      await tg.send(`⚠️ Whale bot error: ${e.message.substring(0, 100)}`);
       await page.waitForTimeout(30000);
     }
   }

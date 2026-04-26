@@ -170,7 +170,11 @@ module.exports = { scrapeMyTweets, parseCount };
 
 if (require.main === module) {
   (async () => {
-    const handle = process.argv[2] || process.env.X_USERNAME || 'PramodReddy1606';
+    const handle = process.argv[2] || process.env.X_USERNAME;
+    if (!handle) {
+      console.error('Provide a handle: node scripts/scrape-my-tweets.js <handle> (or set X_USERNAME in .env)');
+      process.exit(1);
+    }
     console.log(`Scraping @${handle}/with_replies — last 30 days`);
     console.log(`Filter: impressions >= 100 OR replies >= 1 OR reposts >= 1\n`);
 

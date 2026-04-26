@@ -43,22 +43,57 @@ ANTHROPIC_API_KEY=
 X_USERNAME=          # without @
 ```
 
-Optional env overrides:
+**Important Telegram caveat:** `getUpdates` is single-consumer per bot token. Running more than one bot simultaneously against the same `TELEGRAM_BOT_TOKEN` causes them to eat each other's updates and silently drop commands. To run multiple bots concurrently, create distinct BotFather bots and set per-bot tokens (see `.env.example`):
+
+- `WHALE_TELEGRAM_BOT_TOKEN` / `WHALE_TELEGRAM_CHAT_ID`
+- `MANUAL_TELEGRAM_BOT_TOKEN` / `MANUAL_TELEGRAM_CHAT_ID`
+- `JR_TELEGRAM_BOT_TOKEN` / `JR_TELEGRAM_CHAT_ID`
+- `POST_TELEGRAM_BOT_TOKEN` / `POST_TELEGRAM_CHAT_ID`
+- `COMMENT_TELEGRAM_BOT_TOKEN` / `COMMENT_TELEGRAM_CHAT_ID`
+
+Each bot falls back to `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` when its per-bot var is unset. All bots also enforce a chat-ID guard: updates from any chat other than the configured `*_TELEGRAM_CHAT_ID` are dropped.
+
+Other optional env overrides:
+- `X_DISPLAY_NAME` — human display name used in inline reply prompts
 - `SESSION_PATH` — path to Playwright session file (default: `./x-session.json`)
-- `WHALE_LIST_URL` — X list URL to monitor (default in `whale-bot.js`)
-- `WHALE_PROMPT_PATH` / `MANUAL_PROMPT_PATH` — path to voice prompt files
-- `LINKEDIN_URL` / `GITHUB_URL` / `PORTFOLIO_URL` — Pramod's profile URLs (used by job-radar)
+- `CONFIG_PATH` — path to config.json
+- `WHALE_PROMPT_PATH` / `MANUAL_PROMPT_PATH` / `JOB_RADAR_PROMPT_PATH` / `POST_PROMPT_PATH` — voice prompt files
+- `LINKEDIN_URL` / `GITHUB_URL` / `PORTFOLIO_URL` — profile URLs used by job-radar
+- `ANTHROPIC_MODEL` — override the Claude model (default: `claude-sonnet-4-20250514`)
+- `POST_HOUR_PT` — hour (PT) for daily post (default: 8)
 
 ## Architecture
 
-### Two bots, one shared pattern
+### Shared library
 
-Both `whale-bot.js` and `manual-bot.js` follow the same structure:
-1. Launch headless Chromium with a saved X session
-2. Poll an X list every N seconds via `scrapeList()`
+All bots are independent processes that share a `lib/` layer:
+
+| Module | Purpose |
+|---|---|
+| `lib/storage.js` | `loadJSON`, `saveJSON`, `loadText`, `loadTextNoComments`, `loadSet`, `saveSet` |
+| `lib/env.js` | `resolveTelegramAuth(botName)`, `requireEnv`, `resolveEnv` |
+| `lib/identity.js` | `getIdentity()` reads `X_USERNAME` / `X_DISPLAY_NAME` |
+| `lib/telegram.js` | `createTelegramClient({ token, chatId })` — `send`, `answerCallback`, `editMessage`, `pollUpdates` (with chat-ID guard) |
+| `lib/anthropic.js` | `callClaude` (with retry-on-overloaded), `parseLetterOptions`, `weightedPick` |
+| `lib/x-browser.js` | `launchBrowser`, `verifyLogin` |
+| `lib/x-scrape.js` | `scrapeList`, `scrapeHomeTimeline`, `postComment`, `postOriginalTweet`, `deleteOwnComment`, `randomLike` |
+| `lib/rate-limit.js` | `makeRateLimiter(config)` — `canComment`, `canCommentOnAuthor`, `recordComment` |
+| `lib/pending.js` | `makePendingStore(filePath)` — JSON-backed pending-action store that survives restarts |
+| `lib/feedback.js` | `buildFeedbackContext({ feedbackPath, whaleFeedbackPath })` |
+
+Each bot composes these into its own behavior. Bots stay separate so they can be restarted, paused, or run individually.
+
+### Bot pattern
+
+Every bot follows the same shape:
+1. Launch headless Chromium with the saved X session via `launchBrowser`
+2. Poll an X list every N seconds via `scrapeList`
 3. For each new tweet: call Claude API → generate comment(s)
 4. **whale-bot**: auto-post, then notify Telegram with Good/Feedback/Delete buttons
 5. **manual-bot**: send 5 options to Telegram, wait for user to tap one, then post
+6. **job-radar**: scan flagged lists for hiring profiles, auto-follow, engage selectively
+7. **post-scheduler**: at `POST_HOUR_PT`, fetch RSS, generate 3 options, await tap-to-post
+8. **comment-bot**: on-demand fan-out — `/comment <text>` posts the same text to N tweets (used for promotion)
 
 ### Authentication
 
@@ -81,7 +116,9 @@ Both bots load recent feedback and inject it into the Claude prompt as `{FEEDBAC
 
 ### Telegram polling
 
-Both bots poll Telegram's `getUpdates` API in their main loop (long-poll offset tracking via `tgOff`). They handle both callback button clicks and text message commands. whale-bot also uses `pendingActions` (in-memory Map) to track which Telegram message corresponds to which posted comment, so Delete/Feedback actions know which tweet to act on.
+Polling lives in `lib/telegram.js`. Each `createTelegramClient({ token, chatId })` returns a client with its own offset; `pollUpdates` enforces a chat-ID guard and silently drops updates from any chat other than the configured `chatId`.
+
+Pending callback actions (Good/Feedback/Delete buttons, edit-in-progress, daily-post options) are persisted via `makePendingStore(file)` so they survive process restarts. Stale entries get garbage-collected by `pendingStore.gc(ttlMs)`.
 
 ### Rate limiting (whale-bot)
 
@@ -98,11 +135,14 @@ After posting a comment, whale-bot adds the tweet to `data/whale-watch.json`. Ev
 ### Data directory
 
 All runtime state is in `./data/` (not committed):
-- `whale-seen.json` / `manual-seen.json` — set of already-processed tweet URLs
-- `whale-state.json` / `manual-state.json` — pause state
-- `whale-logs.json` / `manual-logs.json` — comment history + hourly/daily counts
-- `whale-watch.json` — watchlist for reply detection
-- `jr-state.json` / `jr-logs.json` / `jr-seen.json` — job-radar bot state
+- `whale-seen.json` / `manual-seen.json` / `jr-seen.json` — sets of already-processed tweet URLs
+- `whale-state.json` / `manual-state.json` / `jr-state.json` / `post-state.json` — pause state + per-bot config
+- `whale-logs.json` / `manual-logs.json` / `jr-logs.json` / `post-log.json` — comment/post history + counts
+- `whale-watch.json` — watchlist for whale-bot's auto-reply
+- `whale-pending.json` / `manual-pending.json` / `jr-pending.json` / `post-pending.json` — persistent pending Telegram actions (so callbacks survive restart)
+- `feedback.json` — manual-bot/job-radar shared approval/rejection/edit corpus
+- `whale-feedback.json` — whale-bot's Good/Feedback/Delete corpus
+- `post-feedback.json` — post-scheduler approval corpus
 
 ### Deployment (Linux server)
 

@@ -3,7 +3,11 @@ require('dotenv').config();
 const { chromium } = require('playwright');
 
 const SESSION_PATH = process.env.SESSION_PATH || './x-session.json';
-const USERNAME = process.env.X_USERNAME || 'PramodReddy1606';
+const USERNAME = process.env.X_USERNAME;
+if (!USERNAME) {
+  console.error('X_USERNAME is required (set in .env, without @)');
+  process.exit(1);
+}
 
 const BROKEN_TWEETS = [
   'https://x.com/F1/status/2038315753145794601',
